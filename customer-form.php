@@ -1,6 +1,6 @@
 <?php
 require_once __DIR__ . '/include/web-config.php';
-$pageTitle = 'Customer Form';
+$pageTitle = 'Customer Form1';
 ?>
 <!doctype html>
 <html lang="en">
