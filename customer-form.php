@@ -23,7 +23,7 @@ $pageTitle = 'Customer Form';
 <?php require __DIR__ . '/include/topbar.php'; ?>
 <section class="page-content">
 
-<script src="assets/js/toaster.js"></script>
+<script src="assets/js/toaster.js"></script>    
 <script src="assets/js/app.js"></script>
 <script src="assets/js/theme.js"></script>
 <script src="assets/js/layout.js"></script>
