@@ -1248,6 +1248,7 @@ body.sidebar-collapsed .sidebar-mini-footer {
   border: 1px solid var(--border);
   box-shadow: var(--card-shadow);
   border-radius: var(--radius-md);
+  margin-top: var(--space-3);
 }
 
 .card-title,
@@ -2486,7 +2487,9 @@ body {
 .table-card table {
   min-width: 760px;
 }
-
+.table-card {
+  margin-top: 10px;
+}
 /* Table styles for starter pages. */
 table {
   width: 100%;
@@ -3700,6 +3703,7 @@ body.sidebar-collapsed .sidebar .submenu {
   overflow-x: auto !important;
   overflow-y: hidden !important;
   border-radius: var(--radius-md) !important;
+  margin-top:10px !important;
 }
 
 .table-card>table,
@@ -4361,6 +4365,7 @@ table.dataTable tbody td.dataTables_empty {
   padding: 13px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-md);
 }
 
 .card-header h2 {
