@@ -1,0 +1,42 @@
+<?php
+declare(strict_types=1);
+require_once dirname(__DIR__) . '/include/bootstrap.php';
+
+function category_tenant_context(array $user): array
+{
+    if ((int)($user['role_type'] ?? 0) === 2) {
+        json_error('Category management is available only for tenant users.', 403);
+    }
+    $branchId = (int)($user['branch_id'] ?? 0);
+    if ($branchId < 1) json_error('No active branch is assigned to your account.', 403);
+    $stmt = db()->prepare(
+        'SELECT b.id AS branch_id,b.company_id,b.branch_name,c.company_name
+         FROM branches b INNER JOIN companies c ON c.id=b.company_id
+         WHERE b.id=:branch_id AND b.status=1 AND c.status=1 LIMIT 1'
+    );
+    $stmt->execute([':branch_id'=>$branchId]);
+    $row=$stmt->fetch();
+    if(!$row) json_error('Your assigned tenant branch is invalid or inactive.',403);
+    return ['branch_id'=>(int)$row['branch_id'],'company_id'=>(int)$row['company_id'],'branch_name'=>(string)$row['branch_name'],'company_name'=>(string)$row['company_name']];
+}
+
+function category_text($value,string $field,string $label,int $max): string
+{
+    $value=trim((string)($value??''));
+    if($value==='') json_error($label.' is required.',422,[$field=>$label.' is required.']);
+    if(mb_strlen($value)>$max) json_error($label.' is too long.',422,[$field=>$label.' must be within '.$max.' characters.']);
+    return $value;
+}
+
+
+function category_generate_code(int $branchId): string{$s=db()->prepare("SELECT category_code FROM categories WHERE branch_id=:branch_id AND category_code REGEXP '^CAT[0-9]+$' ORDER BY CAST(SUBSTRING(category_code,4) AS UNSIGNED) DESC LIMIT 1");$s->execute([':branch_id'=>$branchId]);$last=(string)($s->fetchColumn()?:'');$n=1;if($last!==''&&preg_match('/^CAT([0-9]+)$/i',$last,$m))$n=(int)$m[1]+1;return 'CAT'.str_pad((string)$n,4,'0',STR_PAD_LEFT);}
+function category_record(int $branchId,int $id): array{$s=db()->prepare('SELECT id,branch_id,category_code,category_name,description,status,created_by,created_at,updated_at FROM categories WHERE id=:id AND branch_id=:branch_id LIMIT 1');$s->execute([':id'=>$id,':branch_id'=>$branchId]);$r=$s->fetch();if(!$r)json_error('Category was not found in your branch.',404);$r['id']=(int)$r['id'];$r['branch_id']=(int)$r['branch_id'];$r['status']=(int)$r['status'];return $r;}
+function category_unique(int $branchId,string $name,int $exclude=0): void{$sql='SELECT id FROM categories WHERE branch_id=:branch_id AND LOWER(category_name)=LOWER(:name)';$p=[':branch_id'=>$branchId,':name'=>$name];if($exclude>0){$sql.=' AND id<>:id';$p[':id']=$exclude;}$sql.=' LIMIT 1';$s=db()->prepare($sql);$s->execute($p);if($s->fetchColumn())json_error('Category name already exists in your branch.',409,['category_name'=>'Use a unique category name.']);}
+function category_description($v): ?string{$v=trim((string)($v??''));if($v==='')return null;if(mb_strlen($v)>255)json_error('Description is too long.',422,['description'=>'Description must be within 255 characters.']);return $v;}
+function category_status($v): int{$n=(int)$v;if(!in_array($n,[1,2],true))json_error('Invalid Category status.',422,['status'=>'Status must be Active or Inactive.']);return $n;}
+$method=request_method();
+if($method==='GET'){$access=require_permission('category-list.php',ACTION_VIEW);$user=$access['user'];$ctx=category_tenant_context($user);$b=$ctx['branch_id'];if(isset($_GET['options']))json_success('Category form options loaded.',['next_category_code'=>category_generate_code($b),'allowed_actions'=>$access['actions']]);if(isset($_GET['id']))json_success('Category loaded.',['category'=>category_record($b,positive_id($_GET['id'])),'allowed_actions'=>$access['actions']]);if(isset($_GET['datatable'])){$draw=max(1,(int)($_GET['draw']??1));$start=max(0,(int)($_GET['start']??0));$length=max(1,min(100000,(int)($_GET['length']??10)));$search=trim((string)($_GET['search']['value']??''));$status=$_GET['status']??'';$where=['branch_id=:branch_id'];$base=$where;$p=[':branch_id'=>$b];if($search!==''){$where[]='(category_code LIKE :search OR category_name LIKE :search OR description LIKE :search)';$p[':search']='%'.$search.'%';}if($status!==''){$where[]='status=:status';$p[':status']=category_status($status);} $t=db()->prepare('SELECT COUNT(*) FROM categories WHERE '.implode(' AND ',$base));$t->execute([':branch_id'=>$b]);$total=(int)$t->fetchColumn();$f=db()->prepare('SELECT COUNT(*) FROM categories WHERE '.implode(' AND ',$where));$f->execute($p);$filtered=(int)$f->fetchColumn();$cols=['category_code','category_name','description','status','id'];$idx=(int)($_GET['order'][0]['column']??0);$dir=strtolower((string)($_GET['order'][0]['dir']??'asc'))==='desc'?'DESC':'ASC';$order=$cols[$idx]??'category_code';$sql='SELECT id,category_code,category_name,description,status FROM categories WHERE '.implode(' AND ',$where).' ORDER BY '.$order.' '.$dir.',id ASC LIMIT :start,:length';$s=db()->prepare($sql);foreach($p as $k=>$v)$s->bindValue($k,$v,($k===':branch_id'||$k===':status')?PDO::PARAM_INT:PDO::PARAM_STR);$s->bindValue(':start',$start,PDO::PARAM_INT);$s->bindValue(':length',$length,PDO::PARAM_INT);$s->execute();$rows=$s->fetchAll();foreach($rows as &$r){$r['id']=(int)$r['id'];$r['status']=(int)$r['status'];}unset($r);json_success('Categories loaded.',['datatable'=>['draw'=>$draw,'recordsTotal'=>$total,'recordsFiltered'=>$filtered,'data'=>$rows],'allowed_actions'=>$access['actions']]);}$active=isset($_GET['active'])&&(int)$_GET['active']===1;$sql='SELECT id,category_code,category_name,description,status FROM categories WHERE branch_id=:branch_id'.($active?' AND status=1':'').' ORDER BY category_name';$s=db()->prepare($sql);$s->execute([':branch_id'=>$b]);json_success('Categories loaded.',['categories'=>$s->fetchAll(),'allowed_actions'=>$access['actions']]);}
+if($method==='POST'){$access=require_permission('category-list.php',ACTION_CREATE);$u=$access['user'];$ctx=category_tenant_context($u);$b=$ctx['branch_id'];$d=request_data();$name=category_text($d['category_name']??'','category_name','Category name',120);$desc=category_description($d['description']??'');category_unique($b,$name);$code=category_generate_code($b);try{$s=db()->prepare('INSERT INTO categories(branch_id,category_code,category_name,description,status,created_by,created_at,updated_at) VALUES(:branch_id,:code,:name,:description,1,:created_by,NOW(),NOW())');$s->execute([':branch_id'=>$b,':code'=>$code,':name'=>$name,':description'=>$desc,':created_by'=>(int)$u['id']]);$id=(int)db()->lastInsertId();audit_log((int)$u['id'],ACTION_CREATE,['company_id'=>$ctx['company_id'],'branch_id'=>$b,'menu_id'=>(int)$access['menu']['id'],'record_id'=>$id]);json_success('Category created successfully.',['category'=>category_record($b,$id)],201);}catch(PDOException $e){if($e->getCode()==='23000')json_error('Category code already exists. Please try again.',409);throw $e;}}
+if($method==='PUT'){$access=require_permission('category-list.php',ACTION_UPDATE);$u=$access['user'];$ctx=category_tenant_context($u);$b=$ctx['branch_id'];$d=request_data();require_fields($d,['id']);$id=positive_id($d['id']);$old=category_record($b,$id);$name=category_text($d['category_name']??'','category_name','Category name',120);$desc=category_description($d['description']??'');category_unique($b,$name,$id);db()->prepare('UPDATE categories SET category_name=:name,description=:description,updated_at=NOW() WHERE id=:id AND branch_id=:branch_id')->execute([':name'=>$name,':description'=>$desc,':id'=>$id,':branch_id'=>$b]);audit_log((int)$u['id'],ACTION_UPDATE,['company_id'=>$ctx['company_id'],'branch_id'=>$b,'menu_id'=>(int)$access['menu']['id'],'record_id'=>$id,'old_data'=>$old]);json_success('Category updated successfully.',['category'=>category_record($b,$id)]);}
+if($method==='PATCH'){$d=request_data();require_fields($d,['id','status']);$status=category_status($d['status']);$access=require_permission('category-list.php',$status===1?ACTION_ACTIVATE:ACTION_DEACTIVATE);$u=$access['user'];$ctx=category_tenant_context($u);$b=$ctx['branch_id'];$id=positive_id($d['id']);$old=category_record($b,$id);db()->prepare('UPDATE categories SET status=:status,updated_at=NOW() WHERE id=:id AND branch_id=:branch_id')->execute([':status'=>$status,':id'=>$id,':branch_id'=>$b]);audit_log((int)$u['id'],$status===1?ACTION_ACTIVATE:ACTION_DEACTIVATE,['company_id'=>$ctx['company_id'],'branch_id'=>$b,'menu_id'=>(int)$access['menu']['id'],'record_id'=>$id,'old_data'=>$old]);json_success($status===1?'Category activated.':'Category deactivated.');}
+json_error('Method not allowed.',405);
