@@ -318,6 +318,7 @@ function production_options(int $branchId): array
                 p.product_name,
                 p.product_type,
                 pu.id AS product_unit_id,
+                pu.unit_type,
                 pu.conversion_qty,
                 u.unit_name,
                 u.short_name,
@@ -333,14 +334,15 @@ function production_options(int $branchId): array
          FROM products p
          INNER JOIN product_units pu
             ON pu.product_id = p.id
-           AND pu.unit_type = 1
            AND pu.status = 1
          INNER JOIN units u
             ON u.id = pu.unit_id
          WHERE p.branch_id = :branch_id
            AND p.status = 1
            AND p.product_type IN (1,3)
-         ORDER BY p.product_name ASC'
+         ORDER BY p.product_name ASC,
+                  pu.unit_type ASC,
+                  pu.id ASC'
     );
 
     $materialStmt->execute([':branch_id' => $branchId]);
@@ -348,24 +350,44 @@ function production_options(int $branchId): array
     $materials = [];
 
     foreach ($materialStmt->fetchAll() as $row) {
-        $materials[] = [
-            'id' => (int)$row['id'],
-            'product_code' => (string)$row['product_code'],
-            'product_name' => (string)$row['product_name'],
-            'product_type' => (int)$row['product_type'],
-            'available_stock' => round((float)$row['available_stock'], 3),
-            'primary_unit' => [
-                'product_unit_id' => (int)$row['product_unit_id'],
-                'conversion_qty' => max(1, round((float)$row['conversion_qty'], 4)),
-                'unit_name' => (string)$row['unit_name'],
-                'short_name' => (string)$row['short_name'],
-            ],
+        $id = (int)$row['id'];
+
+        if (!isset($materials[$id])) {
+            $materials[$id] = [
+                'id' => $id,
+                'product_code' => (string)$row['product_code'],
+                'product_name' => (string)$row['product_name'],
+                'product_type' => (int)$row['product_type'],
+                'available_stock' => round((float)$row['available_stock'], 3),
+                'primary_unit' => null,
+                'secondary_unit' => null,
+            ];
+        }
+
+        $unit = [
+            'product_unit_id' => (int)$row['product_unit_id'],
+            'unit_type' => (int)$row['unit_type'],
+            'conversion_qty' => max(1, round((float)$row['conversion_qty'], 4)),
+            'unit_name' => (string)$row['unit_name'],
+            'short_name' => (string)$row['short_name'],
         ];
+
+        if ((int)$row['unit_type'] === 1 && $materials[$id]['primary_unit'] === null) {
+            $materials[$id]['primary_unit'] = $unit;
+        } elseif ((int)$row['unit_type'] === 2 && $materials[$id]['secondary_unit'] === null) {
+            $materials[$id]['secondary_unit'] = $unit;
+        }
+    }
+
+    foreach ($materials as $id => $materialRow) {
+        if ($materialRow['primary_unit'] === null) {
+            unset($materials[$id]);
+        }
     }
 
     return [
         'finished_products' => array_values($finished),
-        'material_products' => $materials,
+        'material_products' => array_values($materials),
     ];
 }
 
@@ -521,53 +543,107 @@ function production_calculate(
             false
         );
 
-        $quantity = production_decimal(
-            $raw['qty'] ?? 0,
+        $primaryQty = production_decimal(
+            $raw['primary_qty'] ?? ($raw['qty'] ?? 0),
             'materials',
-            'Material Quantity'
+            'Primary Quantity'
         );
 
-        if ($quantity <= 0) {
+        $secondaryQty = production_decimal(
+            $raw['secondary_qty'] ?? 0,
+            'materials',
+            'Secondary Quantity'
+        );
+
+        if ($material['secondary_unit'] === null && $secondaryQty > 0) {
+            json_error(
+                $material['product_name'] . ' has no Secondary Unit.',
+                422
+            );
+        }
+
+        if ($primaryQty <= 0 && $secondaryQty <= 0) {
             json_error(
                 'Material Quantity must be greater than zero.',
                 422
             );
         }
 
-        $conversion = max(
+        $primaryConversion = max(
             1,
             (float)$material['primary_unit']['conversion_qty']
         );
 
-        $baseQty = round($quantity * $conversion, 3);
+        $secondaryConversion = $material['secondary_unit'] !== null
+            ? max(1, (float)$material['secondary_unit']['conversion_qty'])
+            : 0.0;
+
+        /*
+         * Server-side re-calculation.
+         * Never trust the live browser total.
+         *
+         * Example:
+         * 5 Box x 12 + 3 Piece x 1 = 63 base Pieces.
+         */
+        $requiredBaseQty = round(
+            ($primaryQty * $primaryConversion) +
+            ($secondaryQty * $secondaryConversion),
+            3
+        );
 
         $available = production_stock(
             $branchId,
             $productId
         );
 
-        if ($validateStock && $available + 0.0005 < $baseQty) {
+        if ($validateStock && $available + 0.0005 < $requiredBaseQty) {
             json_error(
                 'Insufficient stock for ' .
                 $material['product_name'] .
                 '. Available: ' .
                 number_format($available, 3, '.', '') .
                 '. Required: ' .
-                number_format($baseQty, 3, '.', '') .
+                number_format($requiredBaseQty, 3, '.', '') .
                 '.',
                 409
             );
         }
 
-        $materials[] = [
-            'product_id' => $productId,
-            'product_unit_id' =>
-                (int)$material['primary_unit']['product_unit_id'],
-            'qty' => $quantity,
-            'conversion_qty' => $conversion,
-            'base_qty' => $baseQty,
-            'available_stock' => $available,
-        ];
+        /*
+         * No new database columns:
+         * save Primary and Secondary as separate production_materials rows.
+         */
+        if ($primaryQty > 0) {
+            $materials[] = [
+                'product_id' => $productId,
+                'product_unit_id' =>
+                    (int)$material['primary_unit']['product_unit_id'],
+                'unit_type' => 1,
+                'qty' => $primaryQty,
+                'conversion_qty' => $primaryConversion,
+                'base_qty' => round(
+                    $primaryQty * $primaryConversion,
+                    3
+                ),
+                'available_stock' => $available,
+            ];
+        }
+
+        if ($secondaryQty > 0 && $material['secondary_unit'] !== null) {
+            $materials[] = [
+                'product_id' => $productId,
+                'product_unit_id' =>
+                    (int)$material['secondary_unit']['product_unit_id'],
+                'unit_type' => 2,
+                'qty' => $secondaryQty,
+                'conversion_qty' => $secondaryConversion,
+                'base_qty' => round(
+                    $secondaryQty * $secondaryConversion,
+                    3
+                ),
+                'available_stock' => $available,
+            ];
+        }
     }
 
     return [
@@ -695,6 +771,7 @@ function production_material_rows(int $branchId, int $productionId): array
                 pm.product_id,
                 p.product_name,
                 pm.product_unit_id,
+                pu.unit_type,
                 u.unit_name,
                 u.short_name,
                 pm.qty,
@@ -717,7 +794,7 @@ function production_material_rows(int $branchId, int $productionId): array
          INNER JOIN units u
             ON u.id = pu.unit_id
          WHERE pm.production_id = :production_id
-         ORDER BY pm.id ASC'
+         ORDER BY pm.product_id ASC, pu.unit_type ASC, pm.id ASC'
     );
 
     $stmt->execute([
@@ -725,20 +802,69 @@ function production_material_rows(int $branchId, int $productionId): array
         ':production_id' => $productionId,
     ]);
 
-    $rows = $stmt->fetchAll();
+    $grouped = [];
 
-    foreach ($rows as &$row) {
-        foreach (['id','product_id','product_unit_id'] as $key) {
-            $row[$key] = (int)$row[$key];
+    foreach ($stmt->fetchAll() as $row) {
+        $productId = (int)$row['product_id'];
+        $unitType = (int)$row['unit_type'];
+
+        if (!isset($grouped[$productId])) {
+            $grouped[$productId] = [
+                'product_id' => $productId,
+                'product_name' => (string)$row['product_name'],
+                'available_stock' => round((float)$row['available_stock'], 3),
+
+                'primary_product_unit_id' => null,
+                'primary_unit_name' => null,
+                'primary_short_name' => null,
+                'primary_qty' => 0.0,
+                'primary_conversion_qty' => 0.0,
+
+                'secondary_product_unit_id' => null,
+                'secondary_unit_name' => null,
+                'secondary_short_name' => null,
+                'secondary_qty' => 0.0,
+                'secondary_conversion_qty' => 0.0,
+
+                'base_qty' => 0.0,
+            ];
         }
 
-        foreach (['qty','conversion_qty','base_qty','available_stock'] as $key) {
-            $row[$key] = (float)$row[$key];
+        $grouped[$productId]['base_qty'] = round(
+            $grouped[$productId]['base_qty'] + (float)$row['base_qty'],
+            3
+        );
+
+        if ($unitType === 1) {
+            $grouped[$productId]['primary_product_unit_id'] =
+                (int)$row['product_unit_id'];
+            $grouped[$productId]['primary_unit_name'] =
+                (string)$row['unit_name'];
+            $grouped[$productId]['primary_short_name'] =
+                (string)$row['short_name'];
+            $grouped[$productId]['primary_qty'] = round(
+                $grouped[$productId]['primary_qty'] + (float)$row['qty'],
+                3
+            );
+            $grouped[$productId]['primary_conversion_qty'] =
+                (float)$row['conversion_qty'];
+        } elseif ($unitType === 2) {
+            $grouped[$productId]['secondary_product_unit_id'] =
+                (int)$row['product_unit_id'];
+            $grouped[$productId]['secondary_unit_name'] =
+                (string)$row['unit_name'];
+            $grouped[$productId]['secondary_short_name'] =
+                (string)$row['short_name'];
+            $grouped[$productId]['secondary_qty'] = round(
+                $grouped[$productId]['secondary_qty'] + (float)$row['qty'],
+                3
+            );
+            $grouped[$productId]['secondary_conversion_qty'] =
+                (float)$row['conversion_qty'];
         }
     }
-    unset($row);
 
-    return $rows;
+    return array_values($grouped);
 }
 
 function production_payload(int $branchId, int $productionId): array
@@ -873,13 +999,28 @@ function production_post_stock(
          )'
     );
 
+    $materialTotals = [];
+
     foreach ($materials as $material) {
+        $productId = (int)$material['product_id'];
+
+        if (!isset($materialTotals[$productId])) {
+            $materialTotals[$productId] = 0.0;
+        }
+
+        $materialTotals[$productId] = round(
+            $materialTotals[$productId] + (float)$material['base_qty'],
+            3
+        );
+    }
+
+    foreach ($materialTotals as $productId => $baseQty) {
         $consumeInsert->execute([
             ':branch_id' => $branchId,
             ':movement_date' => $movementDate,
-            ':product_id' => $material['product_id'],
+            ':product_id' => $productId,
             ':source_id' => $productionId,
-            ':quantity_out' => $material['base_qty'],
+            ':quantity_out' => $baseQty,
             ':created_by' => $userId,
         ]);
     }
@@ -1185,6 +1326,15 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
     $search = trim((string)($_GET['search']['value'] ?? ''));
     $statusFilter = (string)($_GET['status'] ?? '');
+    $finishedProductFilter = trim((string)($_GET['finished_product_id'] ?? ''));
+    $dateFromRaw = trim((string)($_GET['date_from'] ?? ''));
+    $dateToRaw = trim((string)($_GET['date_to'] ?? ''));
+    $dateFrom = $dateFromRaw === '' ? null : production_date($dateFromRaw);
+    $dateTo = $dateToRaw === '' ? null : production_date($dateToRaw);
+
+    if ($dateFrom !== null && $dateTo !== null && $dateFrom > $dateTo) {
+        json_error('From Date cannot be after To Date.', 422);
+    }
 
     $baseWhere = ['pr.branch_id = :branch_id'];
     $where = $baseWhere;
@@ -1221,6 +1371,27 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':status'] = $status;
     }
 
+    if ($finishedProductFilter !== '') {
+        $finishedProductId = positive_id($finishedProductFilter, 'finished_product_id');
+        $where[] = 'EXISTS (
+            SELECT 1
+            FROM production_items pif
+            WHERE pif.production_id = pr.id
+              AND pif.product_id = :finished_product_id
+        )';
+        $params[':finished_product_id'] = $finishedProductId;
+    }
+
+    if ($dateFrom !== null) {
+        $where[] = 'pr.production_date >= :date_from';
+        $params[':date_from'] = $dateFrom;
+    }
+
+    if ($dateTo !== null) {
+        $where[] = 'pr.production_date <= :date_to';
+        $params[':date_to'] = $dateTo;
+    }
+
     $baseFrom = ' FROM production pr';
 
     $totalStmt = db()->prepare(
@@ -1242,6 +1413,24 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $filteredStmt->execute($params);
     $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+    $summarySql =
+        'SELECT COUNT(*) AS total_production,
+                COALESCE(SUM(CASE WHEN pr.status=1 THEN 1 ELSE 0 END),0) AS draft_count,
+                COALESCE(SUM(CASE WHEN pr.status=2 THEN 1 ELSE 0 END),0) AS posted_count,
+                COALESCE(SUM((SELECT COUNT(*) FROM production_items psi WHERE psi.production_id=pr.id)),0) AS output_items' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $where);
+
+    $summaryStmt = db()->prepare($summarySql);
+    foreach ($params as $key => $value) {
+        $type = in_array($key, [':branch_id', ':status', ':finished_product_id'], true)
+            ? PDO::PARAM_INT
+            : PDO::PARAM_STR;
+        $summaryStmt->bindValue($key, $value, $type);
+    }
+    $summaryStmt->execute();
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $columns = [
         0 => 'pr.production_no',
@@ -1294,7 +1483,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     foreach ($params as $key => $value) {
         $type =
-            ($key === ':branch_id' || $key === ':status')
+            in_array($key, [':branch_id', ':status', ':finished_product_id'], true)
                 ? PDO::PARAM_INT
                 : PDO::PARAM_STR;
 
@@ -1333,6 +1522,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
                 'recordsTotal' => $recordsTotal,
                 'recordsFiltered' => $recordsFiltered,
                 'data' => $rows,
+            ],
+            'summary' => [
+                'total_production' => (int)($summary['total_production'] ?? 0),
+                'draft_count' => (int)($summary['draft_count'] ?? 0),
+                'posted_count' => (int)($summary['posted_count'] ?? 0),
+                'output_items' => (int)($summary['output_items'] ?? 0),
             ],
             'allowed_actions' => $access['actions'],
         ]

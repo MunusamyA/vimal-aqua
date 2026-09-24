@@ -768,7 +768,14 @@ function sales_save(array $data, array $access, array $context, ?int $id=null): 
                 if ($mode === AQUA_SALE_MODE_DIRECT) {
                     $available = aqua_plant_stock($branchId, (int)$item['product_id']);
                     if ((float)$item['base_qty'] > $available + 0.0005) {
-                        json_error($item['product']['product_name'] . ' Plant Stock is insufficient. Available: ' . number_format($available,3,'.',''), 409);
+                        json_error(
+                            $item['product']['product_name'] .
+                            ' Plant Stock is insufficient. Available: ' .
+                            number_format($available,3,'.','') .
+                            ', Required: ' .
+                            number_format((float)$item['base_qty'],3,'.',''),
+                            409
+                        );
                     }
                 } else {
                     $exists = $pdo->prepare('SELECT id FROM line_supply_items WHERE line_supply_id=:supply_id AND product_id=:product_id LIMIT 1');
@@ -776,7 +783,14 @@ function sales_save(array $data, array $access, array $context, ?int $id=null): 
                     if (!$exists->fetchColumn()) json_error($item['product']['product_name'] . ' is not loaded in the selected Truck.', 409);
                     $available = aqua_vehicle_stock($branchId, (int)$vehicleId, (int)$trip['id'], (int)$item['product_id']);
                     if ((float)$item['base_qty'] > $available + 0.0005) {
-                        json_error($item['product']['product_name'] . ' Truck Stock is insufficient. Available: ' . number_format($available,3,'.',''), 409);
+                        json_error(
+                            $item['product']['product_name'] .
+                            ' Truck Stock is insufficient. Available: ' .
+                            number_format($available,3,'.','') .
+                            ', Required: ' .
+                            number_format((float)$item['base_qty'],3,'.',''),
+                            409
+                        );
                     }
                 }
             }
@@ -976,6 +990,71 @@ if ($method === 'GET' && isset($_GET['options'])) {
     ]);
 }
 
+if ($method === 'GET' && isset($_GET['product_context'])) {
+    $access = require_permission('sales-list.php', ACTION_VIEW);
+    $context = aqua_sales_context($access['user']);
+    $branchId = (int)$context['branch_id'];
+
+    $customerId = (int)($_GET['customer_id'] ?? 0);
+    $productId = (int)($_GET['product_id'] ?? 0);
+    $mode = (int)($_GET['mode'] ?? AQUA_SALE_MODE_DIRECT);
+
+    if ($customerId < 1) {
+        json_error('Select Customer before Product.',422,[
+            'customer_id'=>'Select Customer before Product.'
+        ]);
+    }
+
+    if ($productId < 1) {
+        json_error('Select Product.',422,[
+            'product_id'=>'Select Product.'
+        ]);
+    }
+
+    $customer = aqua_customer($branchId,$customerId);
+    $product = aqua_product_bundle($branchId,$productId,$customerId);
+    $product['plant_stock'] = aqua_plant_stock($branchId,$productId);
+    $product['truck_stock'] = 0.0;
+    $trip = null;
+    $resolvedLineId = null;
+
+    if ($mode === AQUA_SALE_MODE_LINE) {
+        require_permission('line-supply-list.php', ACTION_VIEW);
+
+        $vehicleId = (int)($_GET['vehicle_id'] ?? 0);
+        $requestedLineId = (int)($_GET['line_id'] ?? 0);
+
+        $resolved = sales_resolve_line_trip(
+            $branchId,
+            $vehicleId,
+            $requestedLineId,
+            $customer,
+            false
+        );
+
+        $trip = $resolved['trip'];
+        $resolvedLineId = (int)$resolved['line_id'];
+
+        $product['truck_stock'] = aqua_vehicle_stock(
+            $branchId,
+            $vehicleId,
+            (int)$trip['id'],
+            $productId
+        );
+    }
+
+    $product['customer_can_balance'] =
+        (int)$product['container_type'] === 1
+            ? aqua_customer_can_balance($branchId,$customerId,$productId)
+            : 0.0;
+
+    json_success('Sales Product context loaded.',[
+        'product'=>$product,
+        'trip'=>$trip,
+        'resolved_line_id'=>$resolvedLineId,
+    ]);
+}
+
 if ($method === 'GET' && isset($_GET['line_context'])) {
     $access = require_permission('sales-list.php', ACTION_VIEW);
     require_permission('line-supply-list.php', ACTION_VIEW);
@@ -1023,21 +1102,51 @@ if ($method === 'GET' && isset($_GET['customer_summary'])) {
     $customerId = (int)($_GET['customer_id'] ?? 0);
     aqua_customer($branchId, $customerId);
     $reusable = [];
+    $returnableTotal = 0.0;
+
     $stmt = db()->prepare(
-        'SELECT id,product_name FROM products
-         WHERE branch_id=:branch_id AND status=1 AND container_type=1 AND sale_allowed=1
+        'SELECT id,product_code,product_name
+         FROM products
+         WHERE branch_id=:branch_id
+           AND container_type=1
          ORDER BY product_name'
     );
+
     $stmt->execute([':branch_id'=>$branchId]);
+
     foreach ($stmt->fetchAll() as $product) {
+        $balance = aqua_customer_can_balance(
+            $branchId,
+            $customerId,
+            (int)$product['id']
+        );
+
         $reusable[] = [
             'product_id'=>(int)$product['id'],
+            'product_code'=>(string)$product['product_code'],
             'product_name'=>(string)$product['product_name'],
-            'can_balance'=>aqua_customer_can_balance($branchId, $customerId, (int)$product['id']),
+            'can_balance'=>$balance,
         ];
+
+        $returnableTotal = round($returnableTotal + $balance, 3);
     }
+
+    /*
+     * Older customers may have only customers.opening_can_balance without a
+     * product-wise opening movement. Keep that quantity visible as unallocated
+     * instead of incorrectly assigning it to every reusable product.
+     */
+    $legacyOpening = aqua_customer_legacy_opening_can_balance(
+        $branchId,
+        $customerId
+    );
+
+    $returnableTotal = round($returnableTotal + $legacyOpening, 3);
+
     json_success('Customer summary loaded.', [
         'outstanding'=>aqua_customer_outstanding($branchId, $customerId),
+        'returnable_can_total'=>$returnableTotal,
+        'legacy_unallocated_opening_can'=>$legacyOpening,
         'reusable_balances'=>$reusable,
     ]);
 }

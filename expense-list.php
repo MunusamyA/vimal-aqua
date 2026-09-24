@@ -67,6 +67,40 @@ $headScripts = [
     </a>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="receipt-text"></i></div>
+        <div>
+            <div class="kpi-label">Expenses</div>
+            <div class="kpi-value" id="kpiExpenses">0</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div>
+        <div>
+            <div class="kpi-label">Active</div>
+            <div class="kpi-value" id="kpiActive">0</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="indian-rupee"></i></div>
+        <div>
+            <div class="kpi-label">Expense Amount</div>
+            <div class="kpi-value" id="kpiAmount">₹0.00</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="ban"></i></div>
+        <div>
+            <div class="kpi-label">Cancelled</div>
+            <div class="kpi-value" id="kpiCancelled">0</div>
+        </div>
+    </div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
@@ -171,6 +205,18 @@ $headScripts = [
         return Number(value||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
     }
 
+    function setStats(summary){
+        summary=summary||{};
+        document.getElementById('kpiExpenses').textContent=
+            Number(summary.expense_count||0).toLocaleString('en-IN');
+        document.getElementById('kpiActive').textContent=
+            Number(summary.active_count||0).toLocaleString('en-IN');
+        document.getElementById('kpiAmount').textContent=
+            '₹'+money(summary.active_amount);
+        document.getElementById('kpiCancelled').textContent=
+            Number(summary.cancelled_count||0).toLocaleString('en-IN');
+    }
+
     function formatDate(value){
         if(!value)return '-';
         var parts=String(value).split('-');
@@ -266,6 +312,7 @@ $headScripts = [
                     .then(function(result){
                         actions=(result.data.allowed_actions||actions).map(Number);
                         document.getElementById('addExpenseButton').hidden=!has(actions,ACTION_CREATE);
+                        setStats(result.data.summary);
                         AppDataTable.applyExportPermissions(table,actions);
                         callback(result.data.datatable);
                     })

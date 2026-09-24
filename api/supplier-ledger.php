@@ -540,3 +540,4 @@ json_success('Supplier Ledger loaded.', [
     'allowed_actions' => $access['actions'],
     'payment_actions' => $paymentActions,
 ]);
+    

@@ -216,6 +216,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
     $search = trim((string)($_GET['search']['value'] ?? ''));
     $statusFilter = (string)($_GET['status'] ?? '');
+    $gstFilter = trim((string)($_GET['gst_filter'] ?? ''));
 
     $baseWhere = ['branch_id=:branch_id'];
     $where = $baseWhere;
@@ -239,6 +240,16 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':search_pan'] = $term;
     }
 
+    if ($gstFilter !== '') {
+        if ($gstFilter === 'with') {
+            $where[] = '(gstin IS NOT NULL AND TRIM(gstin) <> \'\')';
+        } elseif ($gstFilter === 'without') {
+            $where[] = '(gstin IS NULL OR TRIM(gstin) = \'\')';
+        } else {
+            json_error('Invalid GSTIN filter.', 422);
+        }
+    }
+
     if ($statusFilter !== '') {
         $where[] = 'status=:status';
         $params[':status'] = supplier_status($statusFilter);
@@ -251,6 +262,17 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $filteredStmt = db()->prepare('SELECT COUNT(*) FROM suppliers WHERE ' . implode(' AND ', $where));
     $filteredStmt->execute($params);
     $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+    $summaryStmt = db()->prepare(
+        'SELECT COUNT(*) AS total_suppliers,
+                COALESCE(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END),0) AS active_suppliers,
+                COALESCE(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END),0) AS inactive_suppliers,
+                COALESCE(SUM(opening_balance),0) AS opening_balance
+         FROM suppliers
+         WHERE ' . implode(' AND ', $where)
+    );
+    $summaryStmt->execute($params);
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $columns = [
         0 => 'supplier_code',
@@ -280,6 +302,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $type = ($key === ':branch_id' || $key === ':status') ? PDO::PARAM_INT : PDO::PARAM_STR;
         $stmt->bindValue($key, $value, $type);
     }
+
     $stmt->bindValue(':start', $start, PDO::PARAM_INT);
     $stmt->bindValue(':length', $length, PDO::PARAM_INT);
     $stmt->execute();
@@ -301,6 +324,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             'recordsTotal' => $recordsTotal,
             'recordsFiltered' => $recordsFiltered,
             'data' => $rows,
+        ],
+        'summary' => [
+            'total_suppliers' => (int)($summary['total_suppliers'] ?? 0),
+            'active_suppliers' => (int)($summary['active_suppliers'] ?? 0),
+            'inactive_suppliers' => (int)($summary['inactive_suppliers'] ?? 0),
+            'opening_balance' => (float)($summary['opening_balance'] ?? 0),
         ],
         'allowed_actions' => $access['actions'],
     ]);

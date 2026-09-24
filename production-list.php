@@ -73,22 +73,58 @@ $headScripts = [
     </div>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="factory"></i></div>
+        <div><div class="kpi-label">Production Records</div><div class="kpi-value" id="kpiProduction">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="file-clock"></i></div>
+        <div><div class="kpi-label">Draft</div><div class="kpi-value" id="kpiDraft">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="badge-check"></i></div>
+        <div><div class="kpi-label">Posted</div><div class="kpi-value" id="kpiPosted">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="package-check"></i></div>
+        <div><div class="kpi-label">Output Items</div><div class="kpi-value" id="kpiOutputs">0</div></div>
+    </div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
-            <div class="field col-8">
+            <div class="field col-3">
                 <label for="masterSearch">Search</label>
                 <input class="input" id="masterSearch" type="text" autocomplete="off"
-                       placeholder="Search production no or finished product...">
+                       placeholder="Production no or finished product...">
             </div>
 
-            <div class="field col-4">
+            <div class="field col-3">
+                <label for="finishedProductFilter">Finished Product</label>
+                <select class="select" id="finishedProductFilter">
+                    <option value="">All Finished Products</option>
+                </select>
+            </div>
+
+            <div class="field col-2">
                 <label for="statusFilter">Status</label>
                 <select class="select" id="statusFilter">
                     <option value="">All</option>
                     <option value="1">Draft</option>
                     <option value="2">Posted</option>
                 </select>
+            </div>
+
+            <div class="field col-2">
+                <label for="dateFrom">From Date</label>
+                <input class="input" id="dateFrom" type="date">
+            </div>
+
+            <div class="field col-2">
+                <label for="dateTo">To Date</label>
+                <input class="input" id="dateTo" type="date">
             </div>
         </div>
     </div>
@@ -118,12 +154,36 @@ $headScripts = [
     var searchTimer = null;
 
     var masterSearch = document.getElementById("masterSearch");
+    var finishedProductFilter = document.getElementById("finishedProductFilter");
     var statusFilter = document.getElementById("statusFilter");
+    var dateFrom = document.getElementById("dateFrom");
+    var dateTo = document.getElementById("dateTo");
     var addButton = document.getElementById("addButton");
     var has = AppDataTable.has;
 
     var ACTION_CREATE = 2;
     var ACTION_UPDATE = 3;
+
+    function setSummary(summary) {
+        summary = summary || {};
+        document.getElementById("kpiProduction").textContent = Number(summary.total_production || 0).toLocaleString("en-IN");
+        document.getElementById("kpiDraft").textContent = Number(summary.draft_count || 0).toLocaleString("en-IN");
+        document.getElementById("kpiPosted").textContent = Number(summary.posted_count || 0).toLocaleString("en-IN");
+        document.getElementById("kpiOutputs").textContent = Number(summary.output_items || 0).toLocaleString("en-IN");
+    }
+
+    function loadFilterOptions() {
+        App.api("api/production.php?options=1").then(function(result){
+            var rows = (result.data && result.data.finished_products) || [];
+            finishedProductFilter.innerHTML = '<option value="">All Finished Products</option>';
+            rows.forEach(function(row){
+                var option = document.createElement("option");
+                option.value = String(row.id);
+                option.textContent = row.product_code + " - " + row.product_name;
+                finishedProductFilter.appendChild(option);
+            });
+        }).catch(function(){});
+    }
 
     function escapeHtml(value) {
         return String(value == null ? "" : value)
@@ -150,7 +210,7 @@ $headScripts = [
         serverSide:true,
         searching:true,
         searchDelay:350,
-        appSearchPlaceholder:"Search Production...",
+        appSearch:false,
         appLoaderText:"Loading production...",
         pageLength:10,
         lengthMenu:[[10,25,50,100],[10,25,50,100]],
@@ -173,9 +233,10 @@ $headScripts = [
             params.set("length",data.length);
             params.set("search[value]",data.search.value || "");
 
-            if (statusFilter.value !== "") {
-                params.set("status",statusFilter.value);
-            }
+            if (finishedProductFilter.value !== "") params.set("finished_product_id",finishedProductFilter.value);
+            if (statusFilter.value !== "") params.set("status",statusFilter.value);
+            if (dateFrom.value !== "") params.set("date_from",dateFrom.value);
+            if (dateTo.value !== "") params.set("date_to",dateTo.value);
 
             if (data.order && data.order[0]) {
                 params.set("order[0][column]",data.order[0].column);
@@ -187,12 +248,14 @@ $headScripts = [
                     actions = (result.data.allowed_actions || []).map(Number);
 
                     addButton.hidden = !has(actions,ACTION_CREATE);
+                    setSummary(result.data.summary);
                     AppDataTable.applyExportPermissions(table,actions);
 
                     callback(result.data.datatable);
                 })
                 .catch(function(error){
                     addButton.hidden = true;
+                    setSummary({});
                     App.showError(error,"Unable to load Production.");
                     callback({
                         draw:data.draw,
@@ -294,9 +357,13 @@ $headScripts = [
         },350);
     });
 
-    statusFilter.addEventListener("change",function(){
-        table.ajax.reload(null,true);
+    [finishedProductFilter,statusFilter,dateFrom,dateTo].forEach(function(filter){
+        filter.addEventListener("change",function(){
+            table.ajax.reload(null,true);
+        });
     });
+
+    loadFilterOptions();
 
     if (window.lucide) window.lucide.createIcons();
 

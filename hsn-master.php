@@ -61,12 +61,37 @@ $headScripts = [
     </button>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="receipt-text"></i></div>
+        <div><div class="kpi-label">Total HSN</div><div class="kpi-value" id="kpiTotal">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div>
+        <div><div class="kpi-label">Active HSN</div><div class="kpi-value" id="kpiActive">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="circle-off"></i></div>
+        <div><div class="kpi-label">Inactive HSN</div><div class="kpi-value" id="kpiInactive">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="list-filter"></i></div>
+        <div><div class="kpi-label">Matching Results</div><div class="kpi-value" id="kpiMatching">0</div></div>
+    </div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
-            <div class="field col-8">
+            <div class="field col-4">
                 <label for="masterSearch">Search</label>
-                <input id="masterSearch" type="text" autocomplete="off" placeholder="Search HSN...">
+                <input id="masterSearch" type="text" autocomplete="off" placeholder="HSN code or description...">
+            </div>
+            <div class="field col-4">
+                <label for="gstRateFilter">GST Rate</label>
+                <select id="gstRateFilter">
+                    <option value="">All GST Rates</option>
+                </select>
             </div>
             <div class="field col-4">
                 <label for="statusFilter">Status</label>
@@ -106,6 +131,7 @@ $headScripts = [
     var allowedActions = [];
     var searchTimer = null;
     var masterSearch = document.getElementById("masterSearch");
+    var gstRateFilter = document.getElementById("gstRateFilter");
     var statusFilter = document.getElementById("statusFilter");
     var addButton = document.getElementById("addButton");
     var has = AppDataTable.has;
@@ -114,6 +140,27 @@ $headScripts = [
     var ACTION_UPDATE = 3;
     var ACTION_ACTIVATE = 27;
     var ACTION_DEACTIVATE = 28;
+
+    function setSummary(summary) {
+        summary = summary || {};
+        document.getElementById("kpiTotal").textContent = Number(summary.total_count || 0).toLocaleString("en-IN");
+        document.getElementById("kpiActive").textContent = Number(summary.active_count || 0).toLocaleString("en-IN");
+        document.getElementById("kpiInactive").textContent = Number(summary.inactive_count || 0).toLocaleString("en-IN");
+        document.getElementById("kpiMatching").textContent = Number(summary.matching_count || 0).toLocaleString("en-IN");
+    }
+
+    function loadFilterOptions() {
+        App.api("api/hsn.php?options=1").then(function(result){
+            var rates = (result.data && result.data.gst_rates) || [];
+            gstRateFilter.innerHTML = '<option value="">All GST Rates</option>';
+            rates.forEach(function(value){
+                var option = document.createElement("option");
+                option.value = String(value);
+                option.textContent = Number(value).toFixed(2) + "%";
+                gstRateFilter.appendChild(option);
+            });
+        }).catch(function(){});
+    }
 
     function escapeHtml(value) {
         return String(value === null || value === undefined ? "" : value)
@@ -137,7 +184,7 @@ $headScripts = [
         serverSide:true,
         searching:true,
         searchDelay:350,
-        appSearchPlaceholder:"Search HSN...",
+        appSearch:false,
         appLoaderText:"Loading HSN...",
         pageLength:10,
         lengthMenu:[[10,25,50,100],[10,25,50,100]],
@@ -158,6 +205,7 @@ $headScripts = [
             params.set("start",data.start);
             params.set("length",data.length);
             params.set("search[value]",data.search.value||"");
+            if(gstRateFilter.value!=="")params.set("gst_rate",gstRateFilter.value);
             if(statusFilter.value!=="")params.set("status",statusFilter.value);
             if(data.order&&data.order[0]){
                 params.set("order[0][column]",data.order[0].column);
@@ -167,10 +215,12 @@ $headScripts = [
             App.api("api/hsn.php?"+params.toString()).then(function(result){
                 allowedActions=(result.data.allowed_actions||[]).map(Number);
                 addButton.hidden=!has(allowedActions,ACTION_CREATE);
+                setSummary(result.data.summary);
                 AppDataTable.applyExportPermissions(table,allowedActions);
                 callback(result.data.datatable);
             }).catch(function(error){
                 addButton.hidden=true;
+                setSummary({});
                 App.showError(error,"Unable to load HSN records.");
                 callback({draw:data.draw,recordsTotal:0,recordsFiltered:0,data:[]});
             });
@@ -219,9 +269,13 @@ $headScripts = [
         },350);
     });
 
-    statusFilter.addEventListener("change",function(){
-        table.ajax.reload(null,true);
+    [gstRateFilter,statusFilter].forEach(function(filter){
+        filter.addEventListener("change",function(){
+            table.ajax.reload(null,true);
+        });
     });
+
+    loadFilterOptions();
 
     addButton.addEventListener("click",function(){
         if(!has(allowedActions,ACTION_CREATE))return;

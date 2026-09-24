@@ -207,13 +207,22 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $length = min($length, 100000);
 
     $search = trim((string)($_GET['search']['value'] ?? ''));
+    $statusFilter = trim((string)($_GET['status'] ?? ''));
+
     $baseWhere = ['branch_id = :branch_id'];
     $where = $baseWhere;
     $params = [':branch_id' => $branchId];
 
     if ($search !== '') {
-        $where[] = '(vehicle_no LIKE :search OR vehicle_name LIKE :search)';
-        $params[':search'] = '%' . $search . '%';
+        $term = '%' . $search . '%';
+        $where[] = '(vehicle_no LIKE :search_no OR vehicle_name LIKE :search_name)';
+        $params[':search_no'] = $term;
+        $params[':search_name'] = $term;
+    }
+
+    if ($statusFilter !== '') {
+        $where[] = 'status = :status';
+        $params[':status'] = vehicle_status_value($statusFilter);
     }
 
     $totalStmt = db()->prepare(
@@ -227,6 +236,16 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     );
     $filteredStmt->execute($params);
     $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+    $overallStmt = db()->prepare(
+        'SELECT COUNT(*) AS total_vehicles,
+                COALESCE(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END),0) AS active_vehicles,
+                COALESCE(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END),0) AS inactive_vehicles
+         FROM vehicles
+         WHERE branch_id = :branch_id'
+    );
+    $overallStmt->execute([':branch_id' => $branchId]);
+    $overall = $overallStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $orderColumns = [
         0 => 'vehicle_no',
@@ -252,7 +271,8 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $stmt = db()->prepare($sql);
     foreach ($params as $key => $value) {
-        $stmt->bindValue($key, $value, $key === ':branch_id' ? PDO::PARAM_INT : PDO::PARAM_STR);
+        $isInt = in_array($key, [':branch_id', ':status'], true);
+        $stmt->bindValue($key, $value, $isInt ? PDO::PARAM_INT : PDO::PARAM_STR);
     }
     $stmt->bindValue(':start', $start, PDO::PARAM_INT);
     $stmt->bindValue(':length', $length, PDO::PARAM_INT);
@@ -266,6 +286,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             'recordsTotal' => $recordsTotal,
             'recordsFiltered' => $recordsFiltered,
             'data' => $rows,
+        ],
+        'summary' => [
+            'total_vehicles' => (int)($overall['total_vehicles'] ?? 0),
+            'active_vehicles' => (int)($overall['active_vehicles'] ?? 0),
+            'inactive_vehicles' => (int)($overall['inactive_vehicles'] ?? 0),
+            'matching_vehicles' => $recordsFiltered,
         ],
         'allowed_actions' => $access['actions'],
     ]);

@@ -98,13 +98,16 @@ $pageTitle='Line Supply';
                         <input class="input" id="entrySecondaryQty" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="3" placeholder="0.000" disabled>
                     </div>
                     <div class="field col-2">
-                        <label>Total Stock Qty</label>
+                        <label id="entryBaseQtyLabel">Loaded Base Qty</label>
                         <input class="input" id="entryBaseQty" type="text" readonly placeholder="0.000">
                     </div>
                     <div class="field col-1">
                         <label>&nbsp;</label>
                         <button class="btn btn-primary" id="addLoadingItem" type="button" title="Add Product"><i data-lucide="plus"></i></button>
                     </div>
+                </div>
+                <div class="app-entry-note" id="entryUnitHelp">
+                    Select a Product to see conversion, live Base Qty and remaining Plant Stock.
                 </div>
             </div>
         </div>
@@ -115,7 +118,7 @@ $pageTitle='Line Supply';
             </div>
             <div class="app-table-wrap">
                 <table class="app-editable-table">
-                    <thead><tr><th>#</th><th>Product</th><th>Plant Stock</th><th>Primary Qty</th><th>Secondary Qty</th><th>Loaded Qty</th><th>Current Truck Stock</th><th></th></tr></thead>
+                    <thead><tr><th>#</th><th>Product</th><th>Plant Stock</th><th id="loadPrimaryHead">Main Qty</th><th id="loadSecondaryHead">Base Qty</th><th id="loadedBaseHead">Loaded Base Qty</th><th>Current Truck Stock</th><th></th></tr></thead>
                     <tbody id="loadingItemsBody"><tr><td class="empty" colspan="8">No Products added.</td></tr></tbody>
                 </table>
             </div>
@@ -187,6 +190,87 @@ $pageTitle='Line Supply';
     }
     function round3(value) { return Math.round((numberValue(value) + Number.EPSILON) * 1000) / 1000; }
     function decimal3(value) { return numberValue(value).toFixed(3); }
+
+    function qtyText(value) {
+        var n = round3(value);
+        if (Math.abs(n - Math.round(n)) < 0.0005) return String(Math.round(n));
+        return n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    }
+
+    function primaryConversion(product) {
+        return product && product.primary_unit
+            ? Math.max(1, numberValue(product.primary_unit.conversion_qty || 1))
+            : 1;
+    }
+
+    function secondaryConversion(product) {
+        return product && product.secondary_unit
+            ? Math.max(1, numberValue(product.secondary_unit.conversion_qty || 1))
+            : 0;
+    }
+
+    function baseUnit(product) {
+        if (!product || !product.primary_unit) return null;
+        if (!product.secondary_unit) return product.primary_unit;
+        return secondaryConversion(product) <= primaryConversion(product)
+            ? product.secondary_unit
+            : product.primary_unit;
+    }
+
+    function conversionText(product) {
+        if (!product || !product.primary_unit) return "";
+
+        var pName = unitName(product.primary_unit);
+        var pConv = primaryConversion(product);
+
+        if (!product.secondary_unit) {
+            return "Primary: " + pName + " · Conversion " + qtyText(pConv);
+        }
+
+        var sName = unitName(product.secondary_unit);
+        var sConv = secondaryConversion(product);
+
+        if (pConv >= sConv) {
+            return "1 " + pName + " = " + qtyText(pConv / sConv) + " " + sName;
+        }
+
+        return "1 " + sName + " = " + qtyText(sConv / pConv) + " " + pName;
+    }
+
+    function formatStockQuantity(product, baseQty) {
+        baseQty = Math.max(0, numberValue(baseQty));
+
+        if (!product || !product.primary_unit) return decimal3(baseQty);
+
+        var primary = product.primary_unit;
+        var secondary = product.secondary_unit;
+        var pc = primaryConversion(product);
+
+        if (!secondary) {
+            return qtyText(baseQty / pc) + " " + unitName(primary) +
+                " (" + decimal3(baseQty) + " base)";
+        }
+
+        var sc = secondaryConversion(product);
+
+        if (pc >= sc) {
+            var pQty = Math.floor((baseQty / pc) + 0.0000001);
+            var remainder = Math.max(0, round3(baseQty - pQty * pc));
+            var sQty = sc > 0 ? round3(remainder / sc) : 0;
+
+            return qtyText(pQty) + " " + unitName(primary) +
+                " + " + qtyText(sQty) + " " + unitName(secondary) +
+                " (" + decimal3(baseQty) + " base)";
+        }
+
+        var sQtyLarge = Math.floor((baseQty / sc) + 0.0000001);
+        var rem = Math.max(0, round3(baseQty - sQtyLarge * sc));
+        var pQtySmall = pc > 0 ? round3(rem / pc) : 0;
+
+        return qtyText(pQtySmall) + " " + unitName(primary) +
+            " + " + qtyText(sQtyLarge) + " " + unitName(secondary) +
+            " (" + decimal3(baseQty) + " base)";
+    }
     function money(value) {
         return "₹" + numberValue(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
@@ -223,9 +307,68 @@ $pageTitle='Line Supply';
     }
     function currentProduct() { return state.productMap[String(byId("entryProduct").value || "")] || null; }
     function productBaseQty(product, primaryQty, secondaryQty) {
-        var primaryConv = product && product.primary_unit ? Math.max(1, numberValue(product.primary_unit.conversion_qty)) : 1;
-        var secondaryConv = product && product.secondary_unit ? Math.max(1, numberValue(product.secondary_unit.conversion_qty)) : 0;
-        return round3(numberValue(primaryQty) * primaryConv + numberValue(secondaryQty) * secondaryConv);
+        return round3(
+            numberValue(primaryQty) * primaryConversion(product) +
+            numberValue(secondaryQty) * secondaryConversion(product)
+        );
+    }
+
+    function replaceProductInState(product) {
+        if (!product || !product.id) return;
+
+        var found = false;
+        state.products = state.products.map(function (row) {
+            if (Number(row.id) === Number(product.id)) {
+                found = true;
+                return product;
+            }
+            return row;
+        });
+
+        if (!found) state.products.push(product);
+        state.productMap[String(product.id)] = product;
+    }
+
+    async function handleProductChange() {
+        var productId = Number(byId("entryProduct").value || 0);
+
+        if (!productId) {
+            refreshEntryProduct();
+            updateLoadingHeaders();
+            return;
+        }
+
+        try {
+            var result = await App.api(
+                "api/line-supply.php?product_context=1&product_id=" +
+                encodeURIComponent(productId)
+            );
+
+            var fresh = result.data.product || null;
+            if (fresh) {
+                replaceProductInState(fresh);
+
+                productSelect.setOptions(
+                    state.products.map(function (row) {
+                        return {
+                            value: String(row.id),
+                            text: (row.product_code ? row.product_code + " - " : "") +
+                                row.product_name
+                        };
+                    }),
+                    String(productId)
+                );
+
+                byId("entryProduct").value = String(productId);
+            }
+
+            refreshEntryProduct();
+            updateLoadingHeaders(fresh || currentProduct());
+        } catch (error) {
+            byId("entryProduct").value = "";
+            refreshEntryProduct();
+            reportError(error, "Unable to load current Product stock.");
+        }
     }
 
     function setOptions(data) {
@@ -248,29 +391,135 @@ $pageTitle='Line Supply';
         }), "");
     }
 
+    function updateLoadingHeaders(productHint) {
+        var primaryNames = {};
+        var secondaryNames = {};
+
+        state.items.forEach(function (item) {
+            var product = productForItem(item);
+            if (product && product.primary_unit) {
+                primaryNames[unitName(product.primary_unit)] = true;
+            }
+            if (product && product.secondary_unit) {
+                secondaryNames[unitName(product.secondary_unit)] = true;
+            }
+        });
+
+        if (!state.items.length) {
+            var product = productHint || currentProduct();
+            if (product && product.primary_unit) {
+                primaryNames[unitName(product.primary_unit)] = true;
+            }
+            if (product && product.secondary_unit) {
+                secondaryNames[unitName(product.secondary_unit)] = true;
+            }
+        }
+
+        var pNames = Object.keys(primaryNames);
+        var sNames = Object.keys(secondaryNames);
+
+        byId("loadPrimaryHead").textContent =
+            pNames.length === 1 ? pNames[0] + " Qty" : "Main Qty";
+
+        byId("loadSecondaryHead").textContent =
+            sNames.length === 1 ? sNames[0] + " Qty" : "Base Qty";
+
+        byId("loadedBaseHead").textContent =
+            sNames.length === 1
+                ? "Loaded " + sNames[0]
+                : "Loaded Base Qty";
+    }
+
     function refreshEntryProduct() {
         var product = currentProduct();
+
         if (!product) {
             byId("entryPlantStock").value = "";
-            byId("entryPrimaryQtyLabel").textContent = "Primary Qty";
-            byId("entrySecondaryQtyLabel").textContent = "Secondary Qty";
+            byId("entryPrimaryQtyLabel").textContent = "Main Qty";
+            byId("entrySecondaryQtyLabel").textContent = "Base Qty";
+            byId("entryBaseQtyLabel").textContent = "Loaded Base Qty";
             byId("entrySecondaryQty").disabled = true;
             byId("entrySecondaryQty").value = "";
             byId("entryBaseQty").value = "";
+            byId("entryUnitHelp").textContent =
+                "Select a Product to see conversion, live Base Qty and remaining Plant Stock.";
+            byId("addLoadingItem").disabled = state.status !== 1;
+            updateLoadingHeaders();
             return;
         }
-        byId("entryPlantStock").value = decimal3(product.plant_stock || 0);
-        byId("entryPrimaryQtyLabel").textContent = unitName(product.primary_unit) + " Qty";
-        byId("entrySecondaryQtyLabel").textContent = product.secondary_unit ? unitName(product.secondary_unit) + " Qty" : "Secondary Qty";
-        byId("entrySecondaryQty").disabled = !product.secondary_unit || state.status !== 1;
-        if (!product.secondary_unit) byId("entrySecondaryQty").value = "";
+
+        byId("entryPlantStock").value =
+            formatStockQuantity(product, product.plant_stock || 0);
+
+        byId("entryPrimaryQtyLabel").textContent =
+            unitName(product.primary_unit) + " Qty";
+
+        byId("entrySecondaryQtyLabel").textContent =
+            product.secondary_unit
+                ? unitName(product.secondary_unit) + " Qty"
+                : "Base Qty";
+
+        byId("entryBaseQtyLabel").textContent =
+            "Loaded " + unitName(baseUnit(product));
+
+        byId("entrySecondaryQty").disabled =
+            !product.secondary_unit || state.status !== 1;
+
+        if (!product.secondary_unit) {
+            byId("entrySecondaryQty").value = "";
+        }
+
         updateEntryBaseQty();
+        updateLoadingHeaders(product);
     }
 
     function updateEntryBaseQty() {
         var product = currentProduct();
-        if (!product) { byId("entryBaseQty").value = ""; return; }
-        byId("entryBaseQty").value = decimal3(productBaseQty(product, byId("entryPrimaryQty").value, byId("entrySecondaryQty").value));
+
+        if (!product) {
+            byId("entryBaseQty").value = "";
+            return;
+        }
+
+        var primaryQty = numberValue(byId("entryPrimaryQty").value);
+        var secondaryQty = product.secondary_unit
+            ? numberValue(byId("entrySecondaryQty").value)
+            : 0;
+
+        var loaded = productBaseQty(product, primaryQty, secondaryQty);
+        var available = numberValue(product.plant_stock);
+        var remaining = round3(available - loaded);
+        var baseName = unitName(baseUnit(product));
+
+        byId("entryBaseQty").value =
+            decimal3(loaded) + " " + baseName;
+
+        var parts = [
+            conversionText(product),
+            "Available: " + formatStockQuantity(product, available),
+            "Load Base: " + decimal3(loaded) + " " + baseName
+        ];
+
+        if (loaded > 0.0005) {
+            if (remaining < -0.0005) {
+                parts.push(
+                    "⚠ Short by " +
+                    formatStockQuantity(product, Math.abs(remaining))
+                );
+            } else {
+                parts.push(
+                    "After Load: " +
+                    formatStockQuantity(product, Math.max(0, remaining))
+                );
+            }
+        }
+
+        byId("entryUnitHelp").textContent = parts.join(" · ");
+
+        byId("addLoadingItem").disabled =
+            state.status !== 1 ||
+            loaded <= 0.0005 ||
+            loaded > available + 0.0005;
     }
 
     function clearEntry() {
@@ -284,9 +533,13 @@ $pageTitle='Line Supply';
         byId("entryPrimaryQty").value = "";
         byId("entrySecondaryQty").value = "";
         byId("entryBaseQty").value = "";
-        byId("entryPrimaryQtyLabel").textContent = "Primary Qty";
-        byId("entrySecondaryQtyLabel").textContent = "Secondary Qty";
+        byId("entryPrimaryQtyLabel").textContent = "Main Qty";
+        byId("entrySecondaryQtyLabel").textContent = "Base Qty";
+        byId("entryBaseQtyLabel").textContent = "Loaded Base Qty";
         byId("entrySecondaryQty").disabled = true;
+        byId("entryUnitHelp").textContent =
+            "Select a Product to see conversion, live Base Qty and remaining Plant Stock.";
+        updateLoadingHeaders();
         if (productSelect && typeof productSelect.focus === "function") productSelect.focus();
     }
 
@@ -303,7 +556,12 @@ $pageTitle='Line Supply';
         if (primaryQty <= 0 && secondaryQty <= 0) { showWarning("Enter loading quantity."); return; }
         var loaded = productBaseQty(product, primaryQty, secondaryQty);
         if (loaded > numberValue(product.plant_stock) + 0.0005) {
-            showWarning("Loading quantity exceeds current Plant Stock.");
+            showWarning(
+                "Loading quantity exceeds Plant Stock. Available: " +
+                formatStockQuantity(product, product.plant_stock) +
+                ", Required: " +
+                formatStockQuantity(product, loaded)
+            );
             return;
         }
         state.items.push({
@@ -344,6 +602,8 @@ $pageTitle='Line Supply';
     }
 
     function renderLoadingItems() {
+        updateLoadingHeaders();
+
         var body = byId("loadingItemsBody");
         if (!state.items.length) {
             body.innerHTML = '<tr><td class="empty" colspan="8">No Products added.</td></tr>';
@@ -359,11 +619,15 @@ $pageTitle='Line Supply';
             return '<tr data-index="' + index + '">' +
                 '<td>' + (index + 1) + '</td>' +
                 '<td><strong>' + escapeHtml(product.product_name || item.product_name || "-") + '</strong><div class="muted">' + escapeHtml(product.product_code || item.product_code || "") + '</div></td>' +
-                '<td >' + decimal3(plant) + '</td>' +
+                '<td><strong>' + escapeHtml(formatStockQuantity(product, plant)) + '</strong><div class="muted js-load-stock-status">' +
+                    (state.status === 1
+                        ? 'Remaining ' + escapeHtml(formatStockQuantity(product, Math.max(0, plant - loaded)))
+                        : '') +
+                '</div></td>' +
                 '<td><input class="input js-load-primary" type="text" inputmode="decimal" value="' + (numberValue(item.primary_qty) || "") + '"' + disabled + '><div class="muted">' + escapeHtml(unitName(product.primary_unit)) + '</div></td>' +
                 '<td>' + (product.secondary_unit ? '<input class="input js-load-secondary" type="text" inputmode="decimal" value="' + (numberValue(item.secondary_qty) || "") + '"' + disabled + '><div class="muted">' + escapeHtml(unitName(product.secondary_unit)) + '</div>' : '—') + '</td>' +
-                '<td  data-loaded-index="' + index + '">' + decimal3(loaded) + '</td>' +
-                '<td >' + decimal3(truck) + '</td>' +
+                '<td data-loaded-index="' + index + '"><strong>' + decimal3(loaded) + '</strong><div class="muted">' + escapeHtml(unitName(baseUnit(product))) + '</div></td>' +
+                '<td>' + escapeHtml(formatStockQuantity(product, truck)) + '</td>' +
                 '<td >' + (state.status === 1 ? '<button class="action-button js-remove-loading" type="button" data-index="' + index + '" title="Remove"><i data-lucide="trash-2"></i></button>' : '') + '</td>' +
                 '</tr>';
         }).join("");
@@ -389,7 +653,30 @@ $pageTitle='Line Supply';
                 empty_collected_qty: numberValue(row.empty_collected_qty),
                 damaged_collected_qty: numberValue(row.damaged_collected_qty),
                 truck_stock: numberValue(row.truck_stock),
-                product: product
+                plant_stock: numberValue(
+                    row.plant_stock !== undefined
+                        ? row.plant_stock
+                        : (product ? product.plant_stock : 0)
+                ),
+                product: product || {
+                    id: Number(row.product_id),
+                    product_name: row.product_name || "",
+                    product_code: row.product_code || "",
+                    container_type: Number(row.container_type || 0),
+                    primary_unit: {
+                        product_unit_id: Number(row.primary_product_unit_id || 0),
+                        conversion_qty: numberValue(row.primary_conversion_qty || 1),
+                        unit_name: row.primary_unit_name || "",
+                        short_name: row.primary_short_name || ""
+                    },
+                    secondary_unit: row.secondary_product_unit_id ? {
+                        product_unit_id: Number(row.secondary_product_unit_id || 0),
+                        conversion_qty: numberValue(row.secondary_conversion_qty || 1),
+                        unit_name: row.secondary_unit_name || "",
+                        short_name: row.secondary_short_name || ""
+                    } : null,
+                    plant_stock: numberValue(row.plant_stock || 0)
+                }
             });
         });
     }
@@ -440,6 +727,7 @@ $pageTitle='Line Supply';
         byId("addLoadingItem").disabled = !canEditDraft;
 
         renderLoadingItems();
+        if (canEditDraft) updateEntryBaseQty();
         
         
         refreshIcons();
@@ -475,6 +763,46 @@ $pageTitle='Line Supply';
         applyTripUI();
     }
 
+    function validateLoadingItems() {
+        readLoadingRows();
+
+        for (var i = 0; i < state.items.length; i += 1) {
+            var item = state.items[i];
+            var product = productForItem(item);
+            var required = productBaseQty(
+                product,
+                item.primary_qty,
+                item.secondary_qty
+            );
+            var available = numberValue(
+                item.plant_stock !== undefined
+                    ? item.plant_stock
+                    : product.plant_stock
+            );
+
+            if (required <= 0.0005) {
+                showWarning(
+                    "Enter loading quantity for " +
+                    (product.product_name || "Product") + "."
+                );
+                return false;
+            }
+
+            if (required > available + 0.0005) {
+                showWarning(
+                    (product.product_name || "Product") +
+                    " Plant Stock insufficient. Available: " +
+                    formatStockQuantity(product, available) +
+                    ", Required: " +
+                    formatStockQuantity(product, required)
+                );
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     function loadingPayload(intent) {
         readLoadingRows();
         return {
@@ -496,7 +824,13 @@ $pageTitle='Line Supply';
             showWarning("Date, Truck and Line are required.");
             return;
         }
-        if (!state.items.length) { showWarning("Add at least one Product to Truck Loading."); return; }
+        if (!state.items.length) {
+            showWarning("Add at least one Product to Truck Loading.");
+            return;
+        }
+
+        if (!validateLoadingItems()) return;
+
         state.saving = true;
         try {
             var result = await App.api("api/line-supply.php", { method: "POST", body: loadingPayload(intent) });
@@ -530,7 +864,7 @@ $pageTitle='Line Supply';
         }
     }
 
-    byId("entryProduct").addEventListener("change", refreshEntryProduct);
+    byId("entryProduct").addEventListener("change", handleProductChange);
     byId("entryPrimaryQty").addEventListener("input", updateEntryBaseQty);
     byId("entrySecondaryQty").addEventListener("input", updateEntryBaseQty);
     byId("addLoadingItem").addEventListener("click", addLoadingItem);
@@ -538,10 +872,42 @@ $pageTitle='Line Supply';
     byId("loadingItemsBody").addEventListener("input", function (event) {
         var row = event.target.closest("tr[data-index]");
         if (!row) return;
+
         readLoadingRows();
+
         var index = Number(row.getAttribute("data-index"));
-        var cell = row.querySelector('[data-loaded-index="' + index + '"]');
-        if (cell && state.items[index]) cell.textContent = decimal3(state.items[index].loaded_base_qty);
+        var item = state.items[index];
+        if (!item) return;
+
+        var product = productForItem(item);
+        var loaded = numberValue(item.loaded_base_qty);
+        var plant = numberValue(
+            item.plant_stock !== undefined
+                ? item.plant_stock
+                : product.plant_stock
+        );
+        var remaining = round3(plant - loaded);
+
+        var cell = row.querySelector(
+            '[data-loaded-index="' + index + '"]'
+        );
+        if (cell) {
+            cell.innerHTML =
+                '<strong>' + decimal3(loaded) + '</strong>' +
+                '<div class="muted">' +
+                escapeHtml(unitName(baseUnit(product))) +
+                '</div>';
+        }
+
+        var stockStatus = row.querySelector(".js-load-stock-status");
+        if (stockStatus) {
+            stockStatus.textContent =
+                remaining < -0.0005
+                    ? "Short " +
+                        formatStockQuantity(product, Math.abs(remaining))
+                    : "Remaining " +
+                        formatStockQuantity(product, Math.max(0, remaining));
+        }
     });
     byId("loadingItemsBody").addEventListener("click", function (event) {
         var button = event.target.closest(".js-remove-loading");

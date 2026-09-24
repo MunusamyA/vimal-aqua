@@ -165,6 +165,54 @@ function employee_options(array $user): void
     ]);
 }
 
+function employee_list_options(array $user): void
+{
+    if ((int) $user['role_type'] === 2) {
+        $branches = db()->query(
+            'SELECT b.id, b.company_id, b.branch_name, c.company_name
+             FROM branches b
+             INNER JOIN companies c ON c.id = b.company_id
+             WHERE b.status = 1 AND c.status = 1
+             ORDER BY c.company_name, b.branch_name'
+        )->fetchAll();
+
+        $roles = db()->query(
+            'SELECT r.id, r.company_id, r.role_name, c.company_name
+             FROM roles r
+             INNER JOIN companies c ON c.id = r.company_id
+             WHERE r.role_type = 3 AND r.status = 1 AND c.status = 1
+             ORDER BY c.company_name, r.role_name'
+        )->fetchAll();
+    } else {
+        $branch = employee_branch_record($user, (int) $user['branch_id']);
+        $branches = [[
+            'id' => (int) $branch['id'],
+            'company_id' => (int) $branch['company_id'],
+            'branch_name' => (string) $branch['branch_name'],
+            'company_name' => (string) $branch['company_name'],
+        ]];
+
+        $stmt = db()->prepare(
+            'SELECT r.id, r.company_id, r.role_name, c.company_name
+             FROM roles r
+             INNER JOIN companies c ON c.id = r.company_id
+             WHERE r.company_id = :company_id AND r.role_type = 3 AND r.status = 1
+             ORDER BY r.role_name'
+        );
+        $stmt->execute([':company_id' => (int) $branch['company_id']]);
+        $roles = $stmt->fetchAll();
+    }
+
+    json_success('Employee list filters loaded.', [
+        'branches' => $branches,
+        'roles' => $roles,
+        'current_user' => [
+            'role_type' => (int) $user['role_type'],
+            'branch_id' => $user['branch_id'] === null ? null : (int) $user['branch_id'],
+        ],
+    ]);
+}
+
 function employee_result_item(array $row): array
 {
     $reference = encryptReference('employee', (int) $row['id']);
@@ -175,6 +223,11 @@ function employee_result_item(array $row): array
 }
 
 $method = request_method();
+
+if ($method === 'GET' && isset($_GET['list_options'])) {
+    $access = require_permission('employee-list.php', ACTION_VIEW);
+    employee_list_options($access['user']);
+}
 
 if ($method === 'GET' && isset($_GET['options'])) {
     $access = require_permission('employee-form.php', ACTION_VIEW);
@@ -212,6 +265,21 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $searchValue = trim((string) $_GET['search']['value']);
     }
 
+    $roleId = null;
+    $roleRaw = trim((string) ($_GET['role_id'] ?? ''));
+    if ($roleRaw !== '') {
+        $roleId = positive_id($roleRaw, 'role_id');
+    }
+
+    $statusFilter = null;
+    $statusRaw = trim((string) ($_GET['status'] ?? ''));
+    if ($statusRaw !== '') {
+        $statusFilter = (int) $statusRaw;
+        if (!in_array($statusFilter, [0, 1], true)) {
+            json_error('Invalid employee status filter.', 422);
+        }
+    }
+
     $baseFrom =
         ' FROM employees e
           LEFT JOIN users u ON u.id = e.user_id
@@ -227,11 +295,34 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     }
     $baseWhere = $where;
 
+    if ($roleId !== null) {
+        $where[] = 'u.role_id = :role_id';
+        $params[':role_id'] = $roleId;
+    }
+
+    if ($statusFilter !== null) {
+        $where[] = 'e.status = :status_filter';
+        $params[':status_filter'] = $statusFilter;
+    }
+
     if ($searchValue !== '') {
-        $where[] = '(e.employee_code LIKE :search OR e.name LIKE :search OR e.email LIKE :search
-                     OR e.mobile LIKE :search OR u.username LIKE :search OR r.role_name LIKE :search
-                     OR b.branch_name LIKE :search OR c.company_name LIKE :search)';
-        $params[':search'] = '%' . $searchValue . '%';
+        $like = '%' . $searchValue . '%';
+        $where[] = '(e.employee_code LIKE :search_code
+                     OR e.name LIKE :search_name
+                     OR e.email LIKE :search_email
+                     OR e.mobile LIKE :search_mobile
+                     OR u.username LIKE :search_username
+                     OR r.role_name LIKE :search_role
+                     OR b.branch_name LIKE :search_branch
+                     OR c.company_name LIKE :search_company)';
+        $params[':search_code'] = $like;
+        $params[':search_name'] = $like;
+        $params[':search_email'] = $like;
+        $params[':search_mobile'] = $like;
+        $params[':search_username'] = $like;
+        $params[':search_role'] = $like;
+        $params[':search_branch'] = $like;
+        $params[':search_company'] = $like;
     }
 
     $totalParams = [];
@@ -248,6 +339,18 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $filteredStmt = db()->prepare($filteredSql);
     $filteredStmt->execute($params);
     $recordsFiltered = (int) $filteredStmt->fetchColumn();
+
+    $summarySql =
+        'SELECT COUNT(*) AS total_employees,
+                COALESCE(SUM(CASE WHEN e.status = 1 THEN 1 ELSE 0 END),0) AS active_employees,
+                COALESCE(SUM(CASE WHEN e.status = 0 THEN 1 ELSE 0 END),0) AS inactive_employees,
+                COALESCE(SUM(CASE WHEN e.user_id IS NOT NULL THEN 1 ELSE 0 END),0) AS login_accounts' .
+        $baseFrom .
+        ($where ? ' WHERE ' . implode(' AND ', $where) : '');
+
+    $summaryStmt = db()->prepare($summarySql);
+    $summaryStmt->execute($params);
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $orderColumns = [
         0 => 'e.employee_code', 1 => 'e.name', 2 => 'b.branch_name', 3 => 'r.role_name',
@@ -280,6 +383,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             'recordsTotal' => $recordsTotal,
             'recordsFiltered' => $recordsFiltered,
             'data' => $rows,
+        ],
+        'summary' => [
+            'total_employees' => (int) ($summary['total_employees'] ?? 0),
+            'active_employees' => (int) ($summary['active_employees'] ?? 0),
+            'inactive_employees' => (int) ($summary['inactive_employees'] ?? 0),
+            'login_accounts' => (int) ($summary['login_accounts'] ?? 0),
         ],
         'list_actions' => $access['actions'],
         'form_actions' => $formActions,

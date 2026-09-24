@@ -62,70 +62,15 @@ $headScripts = [
 <div class="page-head">
     <div>
         <h1>Supplier Ledger</h1>
-        <p>Supplier outstanding, purchases, payments and settlement discount statement.</p>
+        <p>Supplier purchases, payments and outstanding statement.</p>
     </div>
     <a class="btn gray" href="supplier-payment-list.php">
         <i data-lucide="hand-coins"></i>Supplier Payments
     </a>
 </div>
 
-<!-- =========================================================
-     CURRENT OUTSTANDING - TOP STATS
-========================================================= -->
-<div class="form-row">
-    <div class="field col-4">
-        <article class="card kpi-card">
-            <span class="kpi-icon orange">
-                <i data-lucide="wallet"></i>
-            </span>
-            <div>
-                <div class="kpi-label">Opening Balance Pending</div>
-                <div class="kpi-value" id="kpiOpeningPending">₹0.00</div>
-                <div class="kpi-meta"><span>Current</span></div>
-            </div>
-        </article>
-    </div>
-
-    <div class="field col-4">
-        <article class="card kpi-card">
-            <span class="kpi-icon blue">
-                <i data-lucide="shopping-cart"></i>
-            </span>
-            <div>
-                <div class="kpi-label">Purchase Outstanding</div>
-                <div class="kpi-value" id="kpiPurchaseOutstanding">₹0.00</div>
-                <div class="kpi-meta"><span>Current</span></div>
-            </div>
-        </article>
-    </div>
-
-    <div class="field col-4">
-        <article class="card kpi-card">
-            <span class="kpi-icon teal">
-                <i data-lucide="circle-dollar-sign"></i>
-            </span>
-            <div>
-                <div class="kpi-label">Overall Outstanding</div>
-                <div class="kpi-value" id="kpiOverallOutstanding">₹0.00</div>
-                <div class="kpi-meta"><span>Current payable</span></div>
-            </div>
-        </article>
-    </div>
-</div>
-
-<!-- =========================================================
-     FILTERS
-========================================================= -->
-<article class="card form-card form-section">
-    <div class="card-header">
-        <div>
-            <h2 class="section-heading">
-                <i data-lucide="filter"></i>Ledger Filters
-            </h2>
-            <p>Select supplier and period to view the complete statement.</p>
-        </div>
-    </div>
-
+<!-- Compact Filters -->
+<div class="card form-section">
     <div class="card-body">
         <div class="form-row">
             <div class="field col-4">
@@ -146,7 +91,7 @@ $headScripts = [
             </div>
 
             <div class="field col-2">
-                <label for="transactionType">Transaction Type</label>
+                <label for="transactionType">Type</label>
                 <select id="transactionType">
                     <option value="">All Transactions</option>
                     <option value="purchase">Purchase</option>
@@ -160,48 +105,88 @@ $headScripts = [
             </div>
         </div>
     </div>
-</article>
+</div>
 
-<!-- =========================================================
-     SUPPLIER INFORMATION - SINGLE ROW
-========================================================= -->
-<article class="card form-section" id="supplierIdentity" hidden>
-    <div class="card-header">
-        <div>
-            <h2 class="card-title">Supplier Information</h2>
-            <p class="card-description">Current supplier details for the selected ledger.</p>
-        </div>
+<!-- Main Ledger Stats -->
+<div class="form-row">
+    <div class="field col-3">
+        <article class="card kpi-card">
+            <span class="kpi-icon blue">
+                <i data-lucide="history"></i>
+            </span>
+            <div>
+                <div class="kpi-label">Opening / Brought Forward</div>
+                <div class="kpi-value" id="kpiBroughtForward">₹0.00</div>
+                <div class="kpi-meta">
+                    <span id="kpiBroughtForwardMeta">Start balance</span>
+                </div>
+            </div>
+        </article>
     </div>
 
+    <div class="field col-3">
+        <article class="card kpi-card">
+            <span class="kpi-icon orange">
+                <i data-lucide="receipt-text"></i>
+            </span>
+            <div>
+                <div class="kpi-label">Purchases</div>
+                <div class="kpi-value" id="kpiPeriodPurchases">₹0.00</div>
+                <div class="kpi-meta"><span>Selected period</span></div>
+            </div>
+        </article>
+    </div>
+
+    <div class="field col-3">
+        <article class="card kpi-card">
+            <span class="kpi-icon green">
+                <i data-lucide="banknote"></i>
+            </span>
+            <div>
+                <div class="kpi-label">Payments</div>
+                <div class="kpi-value" id="kpiActualPayments">₹0.00</div>
+                <div class="kpi-meta">
+                    <span>Discount: <strong id="kpiDiscounts">₹0.00</strong></span>
+                </div>
+            </div>
+        </article>
+    </div>
+
+    <div class="field col-3">
+        <article class="card kpi-card">
+            <span class="kpi-icon teal">
+                <i data-lucide="scale"></i>
+            </span>
+            <div>
+                <div class="kpi-label">Closing Balance</div>
+                <div class="kpi-value" id="kpiClosing">₹0.00</div>
+                <div class="kpi-meta"><span>Selected period</span></div>
+            </div>
+        </article>
+    </div>
+</div>
+
+<!-- Compact Supplier Information -->
+<article class="card form-section" id="supplierIdentity" hidden>
     <div class="card-body">
         <div class="form-row">
-            <div class="field col-2">
+            <div class="field col-3">
                 <span class="metric-label">Supplier</span>
                 <strong id="supplierName">-</strong>
                 <span class="muted" id="supplierCode">-</span>
             </div>
 
-            <div class="field col-2">
+            <div class="field col-3">
                 <span class="metric-label">Mobile</span>
                 <strong id="supplierMobile">-</strong>
             </div>
 
-            <div class="field col-2">
-                <span class="metric-label">Email</span>
-                <strong id="supplierEmail">-</strong>
-            </div>
-
-            <div class="field col-2">
+            <div class="field col-3">
                 <span class="metric-label">GSTIN</span>
                 <strong id="supplierGstin">-</strong>
             </div>
 
-            <div class="field col-2">
-                <span class="metric-label">PAN</span>
-                <strong id="supplierPan">-</strong>
-            </div>
-
-            <div class="field col-2">
+            <div class="field col-3">
                 <span class="metric-label">Current Payable</span>
                 <strong id="supplierCurrentPayable">₹0.00</strong>
             </div>
@@ -209,14 +194,12 @@ $headScripts = [
     </div>
 </article>
 
-<!-- =========================================================
-     PENDING PURCHASE / INVOICE OUTSTANDING
-========================================================= -->
-<article class="card table-card form-section">
+<!-- Pending invoices only appear when something is actually pending -->
+<article class="card table-card form-section" id="pendingPurchaseSection" hidden>
     <div class="card-header">
         <div>
-            <h2 class="card-title">Pending Purchase / Invoice Outstanding</h2>
-            <p class="card-description">Pending posted purchases available for supplier payment.</p>
+            <h2 class="card-title">Pending Purchase / Invoice</h2>
+            <p class="card-description">Outstanding posted purchases available for payment.</p>
         </div>
     </div>
 
@@ -234,104 +217,17 @@ $headScripts = [
                 <th>Action</th>
             </tr>
             </thead>
-            <tbody id="pendingPurchaseBody">
-            <tr>
-                <td colspan="8" class="empty">Select a Supplier.</td>
-            </tr>
-            </tbody>
+            <tbody id="pendingPurchaseBody"></tbody>
         </table>
     </div>
 </article>
 
-<!-- =========================================================
-     STATEMENT SUMMARY
-========================================================= -->
-<article class="card form-section">
-    <div class="card-header">
-        <div>
-            <h2 class="card-title">Statement Summary</h2>
-            <p class="card-description">Summary for the selected date range.</p>
-        </div>
-    </div>
-
-    <div class="card-body">
-        <div class="form-row">
-            <div class="field col-3">
-                <article class="card kpi-card">
-                    <span class="kpi-icon blue">
-                        <i data-lucide="history"></i>
-                    </span>
-                    <div>
-                        <div class="kpi-label">Opening / Brought Forward</div>
-                        <div class="kpi-value" id="kpiBroughtForward">₹0.00</div>
-                        <div class="kpi-meta"><span id="kpiBroughtForwardMeta">Start balance</span></div>
-                    </div>
-                </article>
-            </div>
-
-            <div class="field col-3">
-                <article class="card kpi-card">
-                    <span class="kpi-icon orange">
-                        <i data-lucide="receipt-text"></i>
-                    </span>
-                    <div>
-                        <div class="kpi-label">Period Purchases</div>
-                        <div class="kpi-value" id="kpiPeriodPurchases">₹0.00</div>
-                        <div class="kpi-meta"><span>Liability added</span></div>
-                    </div>
-                </article>
-            </div>
-
-            <div class="field col-2">
-                <article class="card kpi-card">
-                    <span class="kpi-icon green">
-                        <i data-lucide="banknote"></i>
-                    </span>
-                    <div>
-                        <div class="kpi-label">Actual Payments</div>
-                        <div class="kpi-value" id="kpiActualPayments">₹0.00</div>
-                        <div class="kpi-meta"><span>Cash / Bank</span></div>
-                    </div>
-                </article>
-            </div>
-
-            <div class="field col-2">
-                <article class="card kpi-card">
-                    <span class="kpi-icon teal">
-                        <i data-lucide="badge-percent"></i>
-                    </span>
-                    <div>
-                        <div class="kpi-label">Settlement Discount</div>
-                        <div class="kpi-value" id="kpiDiscounts">₹0.00</div>
-                        <div class="kpi-meta"><span>Waived</span></div>
-                    </div>
-                </article>
-            </div>
-
-            <div class="field col-2">
-                <article class="card kpi-card">
-                    <span class="kpi-icon green">
-                        <i data-lucide="scale"></i>
-                    </span>
-                    <div>
-                        <div class="kpi-label">Closing Balance</div>
-                        <div class="kpi-value" id="kpiClosing">₹0.00</div>
-                        <div class="kpi-meta"><span>Closing</span></div>
-                    </div>
-                </article>
-            </div>
-        </div>
-    </div>
-</article>
-
-<!-- =========================================================
-     LEDGER STATEMENT
-========================================================= -->
+<!-- Ledger Statement -->
 <article class="card table-card">
     <div class="card-header">
         <div>
             <h2 class="card-title">Ledger Statement</h2>
-            <p class="card-description">Chronological purchases, actual payments and settlement discounts.</p>
+            <p class="card-description">Chronological purchases and supplier payments.</p>
         </div>
     </div>
 
@@ -463,9 +359,7 @@ $headScripts = [
         el('supplierName').textContent = supplier.supplier_name || '-';
         el('supplierCode').textContent = supplier.supplier_code || '-';
         el('supplierMobile').textContent = supplier.mobile || '-';
-        el('supplierEmail').textContent = supplier.email || '-';
         el('supplierGstin').textContent = supplier.gstin || '-';
-        el('supplierPan').textContent = supplier.pan || '-';
     }
 
     function renderSummary(data){
@@ -474,9 +368,6 @@ $headScripts = [
         var current = data.current || {};
         var period = data.period || {};
 
-        el('kpiOpeningPending').textContent = money(current.opening_pending);
-        el('kpiPurchaseOutstanding').textContent = money(current.purchase_outstanding);
-        el('kpiOverallOutstanding').textContent = money(current.overall_outstanding);
         el('supplierCurrentPayable').textContent = money(current.overall_outstanding);
 
         el('kpiBroughtForward').textContent = money(period.opening_brought_forward);
@@ -506,18 +397,17 @@ $headScripts = [
     }
 
     function renderPending(rows){
+        var section = el('pendingPurchaseSection');
         var body = el('pendingPurchaseBody');
         rows = rows || [];
 
-        if(!el('supplierRef').value){
-            body.innerHTML = '<tr><td colspan="8" class="empty">Select a Supplier.</td></tr>';
+        if(!el('supplierRef').value || !rows.length){
+            section.hidden = true;
+            body.innerHTML = '';
             return;
         }
 
-        if(!rows.length){
-            body.innerHTML = '<tr><td colspan="8" class="empty">No pending Purchase / Invoice found.</td></tr>';
-            return;
-        }
+        section.hidden = false;
 
         body.innerHTML = rows.map(function(row){
             var action = has(paymentActions,2)

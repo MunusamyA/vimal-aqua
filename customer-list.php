@@ -60,14 +60,33 @@ $headScripts = [
     </a>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card"><div class="kpi-icon blue"><i data-lucide="users"></i></div><div><div class="kpi-label">Total Customers</div><div class="kpi-value" id="kpiTotal">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon green"><i data-lucide="user-check"></i></div><div><div class="kpi-label">Active Customers</div><div class="kpi-value" id="kpiActive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon orange"><i data-lucide="user-x"></i></div><div><div class="kpi-label">Inactive Customers</div><div class="kpi-value" id="kpiInactive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon teal"><i data-lucide="indian-rupee"></i></div><div><div class="kpi-label">Opening Balance</div><div class="kpi-value" id="kpiOpening">₹0.00</div></div></div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
-            <div class="field col-8">
+            <div class="field col-3">
                 <label for="masterSearch">Search</label>
-                <input id="masterSearch" type="text" autocomplete="off" placeholder="Search customers...">
+                <input id="masterSearch" type="text" autocomplete="off" placeholder="Code, customer, mobile...">
             </div>
-            <div class="field col-4">
+            <div class="field col-3">
+                <label for="lineFilter">Line</label>
+                <select id="lineFilter">
+                    <option value="">All Lines</option>
+                </select>
+            </div>
+            <div class="field col-3">
+                <label for="priceLevelFilter">Price Level</label>
+                <select id="priceLevelFilter">
+                    <option value="">All Price Levels</option>
+                </select>
+            </div>
+            <div class="field col-3">
                 <label for="statusFilter">Status</label>
                 <select id="statusFilter">
                     <option value="">All</option>
@@ -105,6 +124,8 @@ $headScripts = [
     var allowedActions = [];
     var searchTimer = null;
     var masterSearch = document.getElementById("masterSearch");
+    var lineFilter = document.getElementById("lineFilter");
+    var priceLevelFilter = document.getElementById("priceLevelFilter");
     var statusFilter = document.getElementById("statusFilter");
     var addButton = document.getElementById("addButton");
     var has = AppDataTable.has;
@@ -113,6 +134,52 @@ $headScripts = [
     var ACTION_UPDATE = 3;
     var ACTION_ACTIVATE = 27;
     var ACTION_DEACTIVATE = 28;
+
+
+    function setStats(rows){
+        rows=rows||[];
+        var active=0,inactive=0,opening=0;
+        rows.forEach(function(row){
+            if(Number(row.status)===1) active++; else inactive++;
+            opening+=Number(row.opening_balance||0);
+        });
+        document.getElementById("kpiTotal").textContent=rows.length.toLocaleString("en-IN");
+        document.getElementById("kpiActive").textContent=active.toLocaleString("en-IN");
+        document.getElementById("kpiInactive").textContent=inactive.toLocaleString("en-IN");
+        document.getElementById("kpiOpening").textContent=money(opening);
+    }
+
+    async function refreshStats(){
+        try{
+            var result=await App.api("api/customers.php");
+            setStats(result.data.customers||[]);
+        }catch(error){
+            setStats([]);
+        }
+    }
+
+    async function loadFilterOptions(){
+        try{
+            var result=await App.api("api/customers.php?options=1");
+            var data=result.data||{};
+
+            (data.lines||[]).forEach(function(row){
+                var option=document.createElement("option");
+                option.value=String(row.id);
+                option.textContent=(row.line_code?row.line_code+" - ":"")+row.line_name;
+                lineFilter.appendChild(option);
+            });
+
+            (data.price_levels||[]).forEach(function(row){
+                var option=document.createElement("option");
+                option.value=String(row.id);
+                option.textContent=row.price_level_name;
+                priceLevelFilter.appendChild(option);
+            });
+        }catch(error){
+            App.showError(error,"Unable to load Customer filters.");
+        }
+    }
 
     function escapeHtml(value) {
         return String(value === null || value === undefined ? "" : value)
@@ -144,7 +211,7 @@ $headScripts = [
         serverSide:true,
         searching:true,
         searchDelay:350,
-        appSearchPlaceholder:"Search Customers...",
+        appSearch:false,
         appLoaderText:"Loading customers...",
         pageLength:10,
         lengthMenu:[[10,25,50,100],[10,25,50,100]],
@@ -165,6 +232,8 @@ $headScripts = [
             params.set("start",data.start);
             params.set("length",data.length);
             params.set("search[value]",data.search.value||"");
+            if(lineFilter.value!=="") params.set("line_id",lineFilter.value);
+            if(priceLevelFilter.value!=="") params.set("price_level_id",priceLevelFilter.value);
             if(statusFilter.value!=="") params.set("status",statusFilter.value);
 
             if(data.order&&data.order[0]){
@@ -229,8 +298,10 @@ $headScripts = [
         },350);
     });
 
-    statusFilter.addEventListener("change",function(){
-        table.ajax.reload(null,true);
+    [lineFilter,priceLevelFilter,statusFilter].forEach(function(filter){
+        filter.addEventListener("change",function(){
+            table.ajax.reload(null,true);
+        });
     });
 
     document.addEventListener("click",function(event){
@@ -250,12 +321,15 @@ $headScripts = [
         }).then(function(result){
             if(window.showToast)showToast(result.message||"Customer status updated.",{type:"success",duration:2});
             table.ajax.reload(null,false);
+            refreshStats();
         }).catch(function(error){
             App.showError(error,"Unable to change Customer status.");
         }).finally(function(){
             button.disabled=false;
         });
     });
+    loadFilterOptions();
+    refreshStats();
 })(window.jQuery,window,document);
 </script>
 

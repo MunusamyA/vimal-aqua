@@ -161,6 +161,33 @@ $pageTitle='Line Return';
     function r3(value){return Math.round((n(value)+Number.EPSILON)*1000)/1000}
     function qty(value){return n(value).toLocaleString("en-IN",{minimumFractionDigits:3,maximumFractionDigits:3})}
     function money(value){return "₹"+n(value).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2})}
+
+    function unitName(unitNameValue,shortNameValue){
+        return shortNameValue||unitNameValue||"Base";
+    }
+
+    function baseUnitName(item){
+        var pc=Math.max(1,n(item.primary_conversion_qty||1));
+        var sc=item.secondary_product_unit_id
+            ?Math.max(1,n(item.secondary_conversion_qty||1))
+            :0;
+
+        if(item.secondary_product_unit_id&&sc<=pc){
+            return unitName(
+                item.secondary_unit_name,
+                item.secondary_short_name
+            );
+        }
+
+        return unitName(
+            item.primary_unit_name,
+            item.primary_short_name
+        );
+    }
+
+    function qtyWithUnit(item,value){
+        return qty(value)+" "+baseUnitName(item);
+    }
     function esc(value){return String(value==null?"":value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;")}
     function has(action){return state.actions.map(Number).indexOf(Number(action))!==-1}
     function showSuccess(message){if(window.showToast)showToast(message,{type:"success",duration:2})}
@@ -202,11 +229,11 @@ $pageTitle='Line Return';
             return '<tr data-index="'+i+'">'+
                 '<td class="cell-index">'+(i+1)+'</td>'+
                 '<td class="cell-main"><strong>'+esc(x.product_name||'-')+'</strong><div class="muted">'+esc(x.product_code||'')+'</div></td>'+
-                '<td class="cell-qty dt-body-right">'+qty(x.loaded_base_qty)+'</td>'+
-                '<td class="cell-qty dt-body-right">'+qty(sold)+'</td>'+
-                '<td class="cell-qty dt-body-right">'+qty(x.expected_return_qty)+'</td>'+
+                '<td class="cell-qty dt-body-right">'+qtyWithUnit(x,x.loaded_base_qty)+'</td>'+
+                '<td class="cell-qty dt-body-right">'+qtyWithUnit(x,sold)+'</td>'+
+                '<td class="cell-qty dt-body-right">'+qtyWithUnit(x,x.expected_return_qty)+'</td>'+
                 '<td class="cell-qty"><input class="input js-filled" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="3" value="'+qty(x.actual_return_qty)+'" '+(locked?'readonly':'')+'></td>'+
-                '<td class="cell-qty dt-body-right js-filled-short">'+qty(filledShort)+'</td>'+
+                '<td class="cell-qty dt-body-right js-filled-short">'+qtyWithUnit(x,filledShort)+'</td>'+
                 '<td class="cell-qty dt-body-right">'+(reusable?qty(x.empty_collected_qty):'—')+'</td>'+
                 '<td class="cell-qty">'+(reusable?'<input class="input js-empty" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="3" value="'+qty(x.actual_empty_return_qty)+'" '+(locked?'readonly':'')+'>':'—')+'</td>'+
                 '<td class="cell-qty dt-body-right js-empty-short">'+(reusable?qty(emptyShort):'—')+'</td>'+

@@ -129,7 +129,11 @@ $pageTitle = 'Product Form';
 
     <div class="card form-card form-section">
         <div class="card-header">
-            <div><h2 class="section-heading"><i data-lucide="ruler"></i>Unit Details</h2></div>
+            <div>
+                <h2 class="section-heading"><i data-lucide="ruler"></i>Unit Details</h2>
+                <p>Primary is the larger/main unit. Secondary is the smaller/base unit. Example: 1 Box = 12 Pieces.</p>
+                <p id="unitLockMessage" class="muted" hidden>Unit Details are locked because this Product has already been used in a transaction or stock movement.</p>
+            </div>
         </div>
         <div class="card-body">
             <div class="form-row">
@@ -165,14 +169,43 @@ $pageTitle = 'Product Form';
                 </div>
 
                 <div class="field col-4">
-                    <label for="conversionQty">Conversion Qty</label>
+                    <label for="conversionQty">1 Primary = How Many Secondary?</label>
                     <input id="conversionQty" name="conversion_qty" type="text" inputmode="decimal"
                            data-validation="decimal" data-decimal-places="4"
                            data-regex="^(?:[1-9][0-9]*(?:\.[0-9]{1,4})?|0*\.[0-9]{1,4})$"
                            data-regex-message="Enter a Conversion Qty greater than zero." placeholder="Example: 12">
-                    <div class="muted" id="conversionHelp">Select a Secondary Unit to set conversion.</div>
+                    <div class="muted" id="conversionHelp">Select Primary and Secondary Units to set conversion.</div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div class="card form-card form-section" id="openingStockCard">
+        <div class="card-header">
+            <div>
+                <h2 class="section-heading"><i data-lucide="warehouse"></i>Opening Stock</h2>
+                <p id="openingStockHelp">Optional. Enter stock already available before using this software. Once entered, it cannot be edited or deleted.</p>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="form-row">
+                <div class="field col-4">
+                    <label for="openingPrimaryQty" id="openingPrimaryLabel">Primary Qty</label>
+                    <input id="openingPrimaryQty" name="opening_primary_qty" type="text" inputmode="decimal"
+                           data-validation="decimal" data-decimal-places="3" placeholder="0">
+                </div>
+                <div class="field col-4">
+                    <label for="openingSecondaryQty" id="openingSecondaryLabel">Secondary Qty</label>
+                    <input id="openingSecondaryQty" name="opening_secondary_qty" type="text" inputmode="decimal"
+                           data-validation="decimal" data-decimal-places="3" placeholder="0">
+                </div>
+                <div class="field col-4">
+                    <label for="openingBaseQty">Total Base Stock</label>
+                    <input id="openingBaseQty" type="text" value="0.000" readonly aria-readonly="true">
+                    <div class="muted" id="openingBaseHelp">Stock is maintained in the Secondary/Base Unit.</div>
+                </div>
+            </div>
+            <div class="muted" id="openingEnteredMessage" hidden></div>
         </div>
     </div>
 
@@ -222,7 +255,7 @@ $pageTitle = 'Product Form';
         <div class="card-header">
             <div>
                 <h2 class="section-heading"><i data-lucide="indian-rupee"></i>Base Price</h2>
-                <p>Base / Purchase Price is for one Primary Unit.</p>
+                <p>Base / Purchase Price is for one Primary Unit (example: one Box). Secondary/base-unit cost is calculated automatically.</p>
             </div>
         </div>
         <div class="card-body">
@@ -317,6 +350,10 @@ foreach ($smallMasterForms as $smallMasterForm) {
     var categoryRows=[],subcategoryRows=[],unitRows=[],hsnRows=[],priceLevelRows=[];
     var unitMap={},hsnMap={},allowedActions=[],loading=false;
     var pricingState={};
+    var unitUsageLocked=false;
+    var openingStockEntered=false;
+    var legacyUnitModel=false;
+    var loadedPrimaryUnitId=0,loadedSecondaryUnitId=0;
 
     function dataOf(response){return response&&response.data&&typeof response.data==="object"?response.data:(response||{});}
     function hasAction(id){return allowedActions.map(Number).indexOf(Number(id))!==-1;}
@@ -356,6 +393,8 @@ foreach ($smallMasterForms as $smallMasterForm) {
         secondaryUnitSelect.setOptions(items,secondary?String(secondary):"");
     }
     function unitLabel(id){var row=unitMap[String(id||"")]||null;return row?(row.short_name||row.unit_name||"-"):"-";}
+    function refreshGlobal(select){if(select&&select._globalSelect&&typeof select._globalSelect.refresh==="function")select._globalSelect.refresh();}
+    function setSelectDisabled(select,disabled){if(!select)return;select.disabled=Boolean(disabled);refreshGlobal(select);}
 
     function rebuildHsnMap(){hsnMap={};hsnRows.forEach(function(row){hsnMap[String(row.id)]=row;});}
     function hsnText(row){
@@ -385,7 +424,9 @@ foreach ($smallMasterForms as $smallMasterForm) {
         if(!Number(form.secondary_unit_id.value||0))return null;
         var conversion=num(form.conversion_qty.value);
         if(conversion<=0)return 0;
-        return Math.round((primaryBase()*conversion+Number.EPSILON)*100)/100;
+        return legacyUnitModel
+            ?Math.round((primaryBase()*conversion+Number.EPSILON)*100)/100
+            :Math.round((primaryBase()/conversion+Number.EPSILON)*100)/100;
     }
     function updateBaseDisplays(){
         document.getElementById("primaryBaseDisplay").value=money(primaryBase());
@@ -404,16 +445,60 @@ foreach ($smallMasterForms as $smallMasterForm) {
         if(!secondaryId){
             form.conversion_qty.disabled=true;
             form.conversion_qty.required=false;
-            form.conversion_qty.value="";
-            document.getElementById("conversionHelp").textContent="Select a Secondary Unit to set conversion.";
+            if(!unitUsageLocked)form.conversion_qty.value="";
+            document.getElementById("conversionHelp").textContent="No Secondary Unit selected. Primary Unit is also the base stock unit.";
         }else{
-            form.conversion_qty.disabled=false;
+            form.conversion_qty.disabled=unitUsageLocked;
             form.conversion_qty.required=true;
             form.conversion_qty.setAttribute("data-required-message","Conversion Qty is required when Secondary Unit is selected.");
-            document.getElementById("conversionHelp").textContent="1 "+unitLabel(secondaryId)+" = Conversion Qty × "+unitLabel(primaryId)+".";
+            document.getElementById("conversionHelp").textContent=legacyUnitModel
+                ?("Legacy setup: 1 "+unitLabel(secondaryId)+" = "+(num(form.conversion_qty.value)>0?num(form.conversion_qty.value):"Conversion Qty")+" "+unitLabel(primaryId)+".")
+                :("1 "+unitLabel(primaryId)+" = "+(num(form.conversion_qty.value)>0?num(form.conversion_qty.value):"Conversion Qty")+" "+unitLabel(secondaryId)+".");
         }
         updateBaseDisplays();
+        updateOpeningState();
         renderPricing();
+    }
+
+    function openingBaseQty(){
+        var primaryQty=Math.max(0,num(form.opening_primary_qty.value));
+        var secondaryQty=Math.max(0,num(form.opening_secondary_qty.value));
+        var secondaryId=Number(form.secondary_unit_id.value||0);
+        var conversion=secondaryId?Math.max(0,num(form.conversion_qty.value)):1;
+        if(secondaryId&&conversion<=0)return 0;
+        return legacyUnitModel
+            ?Math.round((primaryQty+(secondaryId?secondaryQty*conversion:0)+Number.EPSILON)*1000)/1000
+            :Math.round(((primaryQty*conversion)+(secondaryId?secondaryQty:0)+Number.EPSILON)*1000)/1000;
+    }
+    function updateOpeningState(){
+        var primaryId=Number(form.primary_unit_id.value||0);
+        var secondaryId=Number(form.secondary_unit_id.value||0);
+        var primaryLabel=primaryId?unitLabel(primaryId):"Primary";
+        var secondaryLabel=secondaryId?unitLabel(secondaryId):"Secondary";
+        document.getElementById("openingPrimaryLabel").textContent=primaryLabel+" Qty";
+        document.getElementById("openingSecondaryLabel").textContent=secondaryId?secondaryLabel+" Qty":"Secondary Qty";
+        form.opening_secondary_qty.disabled=!secondaryId||openingStockEntered||unitUsageLocked;
+        form.opening_primary_qty.disabled=openingStockEntered||unitUsageLocked;
+        document.getElementById("openingBaseQty").value=openingBaseQty().toFixed(3)+(secondaryId?" "+secondaryLabel:" "+primaryLabel);
+        document.getElementById("openingBaseHelp").textContent=secondaryId
+            ?(legacyUnitModel
+                ?"Legacy product: stock base remains "+primaryLabel+" until Unit Details are migrated."
+                :"Base stock is maintained in "+secondaryLabel+".")
+            :"Base stock is maintained in "+primaryLabel+".";
+    }
+    function applyUnitLock(){
+        setSelectDisabled(form.primary_unit_id,unitUsageLocked);
+        setSelectDisabled(form.secondary_unit_id,unitUsageLocked);
+        form.conversion_qty.disabled=unitUsageLocked||!Number(form.secondary_unit_id.value||0);
+        document.querySelectorAll(".js-add-unit").forEach(function(button){button.disabled=unitUsageLocked;});
+        var lockMessage=document.getElementById("unitLockMessage");
+        lockMessage.hidden=!unitUsageLocked;
+        if(unitUsageLocked&&legacyUnitModel){
+            lockMessage.textContent="This is an existing legacy unit setup and it is locked because transactions already exist. Do not swap units on historical records.";
+        }else{
+            lockMessage.textContent="Unit Details are locked because this Product has already been used in a transaction or stock movement.";
+        }
+        updateOpeningState();
     }
 
     function configFor(levelId){
@@ -435,7 +520,9 @@ foreach ($smallMasterForms as $smallMasterForm) {
         if(!secondaryId)return null;
         var conversion=num(form.conversion_qty.value);
         if(conversion<=0)return 0;
-        return Math.round((num(primarySelling)*conversion+Number.EPSILON)*100)/100;
+        return legacyUnitModel
+            ?Math.round((num(primarySelling)*conversion+Number.EPSILON)*100)/100
+            :Math.round((num(primarySelling)/conversion+Number.EPSILON)*100)/100;
     }
     function capturePricing(){
         pricingBody.querySelectorAll("tr[data-price-level-id]").forEach(function(row){
@@ -598,9 +685,22 @@ foreach ($smallMasterForms as $smallMasterForm) {
             secondary_unit_id:units.secondary?units.secondary.unit_id:"",
             hsn_id:product.hsn_id
         });
-        form.conversion_qty.value=units.secondary?String(units.secondary.conversion_qty||""):"";
+        unitUsageLocked=Boolean(data.unit_usage_locked);
+        openingStockEntered=Boolean(data.opening_stock&&data.opening_stock.entered);
+        legacyUnitModel=String(data.unit_model||"")==="legacy_secondary_larger";
+        loadedPrimaryUnitId=Number(units.primary?units.primary.unit_id:0);
+        loadedSecondaryUnitId=Number(units.secondary?units.secondary.unit_id:0);
+        form.conversion_qty.value=units.secondary?String(data.relationship_conversion||""):"";
+        form.opening_primary_qty.value=openingStockEntered?String(data.opening_stock.primary_qty||0):"";
+        form.opening_secondary_qty.value=openingStockEntered?String(data.opening_stock.secondary_qty||0):"";
+        var openingMessage=document.getElementById("openingEnteredMessage");
+        openingMessage.hidden=!openingStockEntered;
+        openingMessage.textContent=openingStockEntered
+            ?"✓ Opening Stock already entered. It is read-only and cannot be edited or deleted."
+            :"";
         applyHsnTaxes();
         updateConversionState();
+        applyUnitLock();
         renderPricing();
     }
 
@@ -628,7 +728,15 @@ foreach ($smallMasterForms as $smallMasterForm) {
                 form.status.value="1";
                 form.gst_type.value="2";
                 form.purchase_price.value="0.00";
+                unitUsageLocked=false;
+                openingStockEntered=false;
+                legacyUnitModel=false;
+                loadedPrimaryUnitId=0;
+                loadedSecondaryUnitId=0;
+                form.opening_primary_qty.value="";
+                form.opening_secondary_qty.value="";
                 updateConversionState();
+                applyUnitLock();
                 renderPricing();
                 if(!hasAction(2))saveButton.disabled=true;
             }
@@ -643,11 +751,23 @@ foreach ($smallMasterForms as $smallMasterForm) {
         loadSubcategories(form.category_id.value,"").catch(function(error){App.showError(error,"Unable to load Subcategories.");});
     });
     form.hsn_id.addEventListener("change",applyHsnTaxes);
-    form.primary_unit_id.addEventListener("change",updateConversionState);
-    form.secondary_unit_id.addEventListener("change",updateConversionState);
+    function handleUnitChange(){
+        if(legacyUnitModel&&!unitUsageLocked&&reference){
+            var primaryId=Number(form.primary_unit_id.value||0);
+            var secondaryId=Number(form.secondary_unit_id.value||0);
+            if(primaryId!==loadedPrimaryUnitId||secondaryId!==loadedSecondaryUnitId){
+                legacyUnitModel=false;
+            }
+        }
+        updateConversionState();
+    }
+    form.primary_unit_id.addEventListener("change",handleUnitChange);
+    form.secondary_unit_id.addEventListener("change",handleUnitChange);
     form.sale_allowed.addEventListener("change",renderPricing);
     form.purchase_price.addEventListener("input",recalcPricing);
-    form.conversion_qty.addEventListener("input",recalcPricing);
+    form.conversion_qty.addEventListener("input",function(){recalcPricing();updateConversionState();});
+    form.opening_primary_qty.addEventListener("input",updateOpeningState);
+    form.opening_secondary_qty.addEventListener("input",updateOpeningState);
     pricingBody.addEventListener("input",function(event){if(event.target.matches(".js-markup-value"))recalcPricing();});
     pricingBody.addEventListener("change",function(event){if(event.target.matches(".js-markup-type"))recalcPricing();});
 
@@ -747,6 +867,8 @@ foreach ($smallMasterForms as $smallMasterForm) {
             primary_unit_id:primaryId,
             secondary_unit_id:secondaryId||null,
             conversion_qty:secondaryId?form.conversion_qty.value.trim():"1.0000",
+            opening_primary_qty:openingStockEntered?"0":form.opening_primary_qty.value.trim(),
+            opening_secondary_qty:openingStockEntered?"0":form.opening_secondary_qty.value.trim(),
             prices:pricePayload()
         };
 

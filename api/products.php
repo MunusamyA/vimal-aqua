@@ -8,6 +8,7 @@ if (!defined('ACTION_CREATE')) define('ACTION_CREATE', 2);
 if (!defined('ACTION_UPDATE')) define('ACTION_UPDATE', 3);
 if (!defined('ACTION_ACTIVATE')) define('ACTION_ACTIVATE', 27);
 if (!defined('ACTION_DEACTIVATE')) define('ACTION_DEACTIVATE', 28);
+if (!defined('STOCK_MOVEMENT_OPENING')) define('STOCK_MOVEMENT_OPENING', 11);
 
 function product_context(array $user): array
 {
@@ -120,6 +121,26 @@ function product_decimal($value, string $field, string $label, int $places = 2, 
         ]);
     }
 
+    return $number;
+}
+
+function product_quantity($value, string $field, string $label): float
+{
+    $text = trim((string)($value ?? ''));
+    if ($text === '') $text = '0';
+
+    if (!preg_match('/^(?:[0-9]+(?:\.[0-9]{1,3})?|\.[0-9]{1,3})$/', $text)) {
+        json_error('Product validation failed.', 422, [
+            $field => 'Enter a valid ' . $label . '.',
+        ]);
+    }
+
+    $number = round((float)$text, 3);
+    if ($number < 0) {
+        json_error('Product validation failed.', 422, [
+            $field => $label . ' cannot be negative.',
+        ]);
+    }
     return $number;
 }
 
@@ -543,15 +564,215 @@ function product_prices(array $units): array
     return $result;
 }
 
+function product_usage_locked(int $branchId, int $productId): bool
+{
+    $stmt = db()->prepare(
+        'SELECT CASE WHEN
+            EXISTS(SELECT 1 FROM stock_movements sm WHERE sm.branch_id = :b1 AND sm.product_id = :p1 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM line_supply_items lsi WHERE lsi.product_id = :p2 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM production_items pri WHERE pri.product_id = :p3 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM production_materials prm WHERE prm.product_id = :p4 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM sales_items si WHERE si.product_id = :p5 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM can_movements cm WHERE cm.branch_id = :b2 AND cm.product_id = :p6 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM can_stock_movements csm WHERE csm.branch_id = :b3 AND csm.product_id = :p7 LIMIT 1)
+            OR EXISTS(SELECT 1 FROM vehicle_stock_movements vsm WHERE vsm.branch_id = :b4 AND vsm.product_id = :p8 LIMIT 1)
+            OR EXISTS(
+                SELECT 1 FROM product_units pu
+                INNER JOIN purchase_items pi ON pi.product_unit_id = pu.id
+                WHERE pu.product_id = :p9 LIMIT 1
+            )
+            OR EXISTS(
+                SELECT 1 FROM product_units pu
+                INNER JOIN customer_order_items coi ON coi.product_unit_id = pu.id
+                WHERE pu.product_id = :p10 LIMIT 1
+            )
+            OR EXISTS(
+                SELECT 1 FROM product_units pu
+                INNER JOIN customer_product_prices cpp ON cpp.product_unit_id = pu.id
+                WHERE pu.product_id = :p11 LIMIT 1
+            )
+        THEN 1 ELSE 0 END'
+    );
+    $stmt->execute([
+        ':b1' => $branchId, ':p1' => $productId,
+        ':p2' => $productId,
+        ':p3' => $productId,
+        ':p4' => $productId,
+        ':p5' => $productId,
+        ':b2' => $branchId, ':p6' => $productId,
+        ':b3' => $branchId, ':p7' => $productId,
+        ':b4' => $branchId, ':p8' => $productId,
+        ':p9' => $productId,
+        ':p10' => $productId,
+        ':p11' => $productId,
+    ]);
+    return (int)$stmt->fetchColumn() === 1;
+}
+
+function product_opening_stock(int $branchId, int $productId, array $units): array
+{
+    $stmt = db()->prepare(
+        'SELECT id, movement_date, quantity_in, quantity_out, created_at
+         FROM stock_movements
+         WHERE branch_id = :branch_id
+           AND product_id = :product_id
+           AND movement_type = :movement_type
+         ORDER BY id ASC
+         LIMIT 1'
+    );
+    $stmt->execute([
+        ':branch_id' => $branchId,
+        ':product_id' => $productId,
+        ':movement_type' => STOCK_MOVEMENT_OPENING,
+    ]);
+    $row = $stmt->fetch();
+
+    if (!$row) {
+        return [
+            'entered' => false,
+            'base_qty' => 0.0,
+            'primary_qty' => 0.0,
+            'secondary_qty' => 0.0,
+            'movement_date' => null,
+        ];
+    }
+
+    $baseQty = round((float)$row['quantity_in'] - (float)$row['quantity_out'], 3);
+    $primaryQty = 0.0;
+    $secondaryQty = 0.0;
+    $primaryConversion = $units['primary']
+        ? max(0.0001, (float)$units['primary']['conversion_qty'])
+        : 1.0;
+    $secondaryConversion = $units['secondary']
+        ? max(0.0001, (float)$units['secondary']['conversion_qty'])
+        : 0.0;
+
+    if ($units['secondary']) {
+        $primaryQty = floor(($baseQty / $primaryConversion) + 0.0000001);
+        $remainder = max(0.0, round($baseQty - ($primaryQty * $primaryConversion), 3));
+        $secondaryQty = round($remainder / $secondaryConversion, 3);
+    } else {
+        $primaryQty = round($baseQty / $primaryConversion, 3);
+    }
+
+    return [
+        'entered' => true,
+        'base_qty' => $baseQty,
+        'primary_qty' => (float)$primaryQty,
+        'secondary_qty' => (float)$secondaryQty,
+        'movement_date' => (string)$row['movement_date'],
+    ];
+}
+
+function product_parse_opening_stock(array $data, ?int $secondaryUnitId, float $primaryConversion): array
+{
+    $primaryQty = product_quantity(
+        $data['opening_primary_qty'] ?? 0,
+        'opening_primary_qty',
+        'Opening Primary Qty'
+    );
+    $secondaryQty = product_quantity(
+        $data['opening_secondary_qty'] ?? 0,
+        'opening_secondary_qty',
+        'Opening Secondary Qty'
+    );
+
+    if (!$secondaryUnitId && $secondaryQty > 0) {
+        json_error('Product validation failed.', 422, [
+            'opening_secondary_qty' => 'Secondary opening quantity requires a Secondary Unit.',
+        ]);
+    }
+
+    $baseQty = round(
+        ($primaryQty * max(0.0001, $primaryConversion)) +
+        ($secondaryUnitId ? $secondaryQty : 0.0),
+        3
+    );
+
+    return [
+        'primary_qty' => $primaryQty,
+        'secondary_qty' => $secondaryQty,
+        'base_qty' => $baseQty,
+    ];
+}
+
+function product_insert_opening_stock(
+    PDO $pdo,
+    int $branchId,
+    int $productId,
+    float $baseQty,
+    int $userId
+): void {
+    if ($baseQty <= 0) return;
+
+    $check = $pdo->prepare(
+        'SELECT id FROM stock_movements
+         WHERE branch_id = :branch_id
+           AND product_id = :product_id
+           AND movement_type = :movement_type
+         LIMIT 1
+         FOR UPDATE'
+    );
+    $check->execute([
+        ':branch_id' => $branchId,
+        ':product_id' => $productId,
+        ':movement_type' => STOCK_MOVEMENT_OPENING,
+    ]);
+
+    if ($check->fetchColumn()) {
+        json_error('Opening Stock has already been entered for this Product.', 409);
+    }
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO stock_movements
+         (branch_id, movement_date, product_id, movement_type, source_id,
+          quantity_in, quantity_out, created_by, created_at)
+         VALUES
+         (:branch_id, NOW(), :product_id, :movement_type, NULL,
+          :quantity_in, 0, :created_by, NOW())'
+    );
+    $stmt->execute([
+        ':branch_id' => $branchId,
+        ':product_id' => $productId,
+        ':movement_type' => STOCK_MOVEMENT_OPENING,
+        ':quantity_in' => $baseQty,
+        ':created_by' => $userId,
+    ]);
+}
+
+function product_unit_model(array $units): string
+{
+    if (!$units['secondary']) return 'single';
+
+    $primaryConversion = (float)($units['primary']['conversion_qty'] ?? 1.0);
+    $secondaryConversion = (float)($units['secondary']['conversion_qty'] ?? 1.0);
+
+    if (abs($primaryConversion - 1.0) <= 0.00005 && $secondaryConversion > 1.00005) {
+        return 'legacy_secondary_larger';
+    }
+    return 'primary_larger';
+}
+
 function product_payload(int $branchId, int $id): array
 {
     $product = product_record($branchId, $id);
     $units = product_units($id);
+    $unitModel = product_unit_model($units);
+    $relationshipConversion = 1.0;
+    if ($units['secondary']) {
+        $relationshipConversion = $unitModel === 'legacy_secondary_larger'
+            ? (float)$units['secondary']['conversion_qty']
+            : (float)$units['primary']['conversion_qty'];
+    }
 
     return [
         'product' => $product,
         'units' => $units,
+        'unit_model' => $unitModel,
+        'relationship_conversion' => $relationshipConversion,
         'prices' => product_prices($units),
+        'unit_usage_locked' => product_usage_locked($branchId, $id),
+        'opening_stock' => product_opening_stock($branchId, $id, $units),
         'options' => product_options(
             $branchId,
             (int)$product['category_id'],
@@ -578,7 +799,8 @@ function product_parse_prices(
     int $saleAllowed,
     float $primaryBase,
     ?float $secondaryBase,
-    float $conversionQty
+    float $conversionQty,
+    bool $secondaryIsLarger = false
 ): array {
     if ($saleAllowed !== 1) return ['primary' => [], 'secondary' => []];
 
@@ -648,20 +870,23 @@ function product_parse_prices(
 
         if ($secondaryBase !== null) {
             /*
-             * Secondary Selling Price always follows unit conversion:
-             * Secondary Selling = Primary Selling x Conversion Qty.
-             *
-             * For Percentage markup, the same percentage is stored.
-             * For Fixed Amount markup, the fixed markup is converted too,
-             * so the stored secondary-unit price remains mathematically
-             * consistent with the common primary-unit pricing.
+             * Vimal Aqua unit model:
+             * 1 Primary (larger unit) = Conversion Qty x Secondary (base unit).
+             * Example: 1 Box = 12 Pieces.
              */
             $secondaryMarkupValue = $markupType === 2
-                ? round($markupValue * $conversionQty, 2)
+                ? round(
+                    $secondaryIsLarger
+                        ? $markupValue * $conversionQty
+                        : $markupValue / $conversionQty,
+                    2
+                )
                 : $markupValue;
 
             $secondarySellingPrice = round(
-                $primarySellingPrice * $conversionQty,
+                $secondaryIsLarger
+                    ? $primarySellingPrice * $conversionQty
+                    : $primarySellingPrice / $conversionQty,
                 2
             );
 
@@ -720,7 +945,7 @@ function product_sync_unit(
     string $label
 ): ?int {
     $stmt = $pdo->prepare(
-        'SELECT id, unit_id
+        'SELECT id, unit_id, conversion_qty
          FROM product_units
          WHERE product_id = :product_id AND unit_type = :unit_type
          ORDER BY id ASC
@@ -741,15 +966,20 @@ function product_sync_unit(
     }
 
     if ($current && (int)$current['unit_id'] === $requestedUnitId) {
+        $currentId = (int)$current['id'];
+        $currentConversion = (float)$current['conversion_qty'];
+        if (abs($currentConversion - $conversionQty) > 0.00005 && product_unit_usage_count($pdo, $currentId) > 0) {
+            json_error($label . ' conversion has already been used and cannot be changed.', 409);
+        }
         $pdo->prepare(
             'UPDATE product_units
              SET conversion_qty = :conversion_qty, status = 1
              WHERE id = :id'
         )->execute([
             ':conversion_qty' => $conversionQty,
-            ':id' => (int)$current['id'],
+            ':id' => $currentId,
         ]);
-        return (int)$current['id'];
+        return $currentId;
     }
 
     if ($current) {
@@ -832,9 +1062,13 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $draw = max(1, (int)($_GET['draw'] ?? 1));
     $start = max(0, (int)($_GET['start'] ?? 0));
-    $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
+    $requestedLength = (int)($_GET['length'] ?? 10);
+    $length = $requestedLength < 0 ? 100000 : max(1, min(100000, $requestedLength));
     $search = trim((string)($_GET['search']['value'] ?? ''));
     $statusFilter = (string)($_GET['status'] ?? '');
+    $categoryFilter = trim((string)($_GET['category_id'] ?? ''));
+    $productTypeFilter = trim((string)($_GET['product_type'] ?? ''));
+    $saleAllowedFilter = trim((string)($_GET['sale_allowed'] ?? ''));
 
     $baseFrom =
         ' FROM products p
@@ -880,6 +1114,33 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':search_secondary'] = $term;
     }
 
+    if ($categoryFilter !== '') {
+        $categoryId = (int)$categoryFilter;
+        if ($categoryId < 1) {
+            json_error('Invalid Category filter.', 422);
+        }
+        $where[] = 'p.category_id = :category_id';
+        $params[':category_id'] = $categoryId;
+    }
+
+    if ($productTypeFilter !== '') {
+        $productType = (int)$productTypeFilter;
+        if (!in_array($productType, [1,2,3], true)) {
+            json_error('Invalid Product Type filter.', 422);
+        }
+        $where[] = 'p.product_type = :product_type';
+        $params[':product_type'] = $productType;
+    }
+
+    if ($saleAllowedFilter !== '') {
+        $saleAllowed = (int)$saleAllowedFilter;
+        if (!in_array($saleAllowed, [0,1], true)) {
+            json_error('Invalid Sales filter.', 422);
+        }
+        $where[] = 'p.sale_allowed = :sale_allowed';
+        $params[':sale_allowed'] = $saleAllowed;
+    }
+
     if ($statusFilter !== '') {
         $where[] = 'p.status = :status';
         $params[':status'] = product_status($statusFilter);
@@ -916,7 +1177,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
                 c.category_name, s.subcategory_name, h.hsn_code,
                 u1.unit_name AS primary_unit_name, u1.short_name AS primary_short_name,
                 u2.unit_name AS secondary_unit_name, u2.short_name AS secondary_short_name,
-                pu2.conversion_qty AS secondary_conversion_qty' .
+                pu1.conversion_qty AS primary_conversion_qty,
+                CASE
+                    WHEN pu2.id IS NULL THEN NULL
+                    WHEN pu1.conversion_qty > 1.00005 THEN pu1.conversion_qty
+                    ELSE pu2.conversion_qty
+                END AS secondary_conversion_qty' .
         $baseFrom .
         ' WHERE ' . implode(' AND ', $where) .
         ' ORDER BY ' . $orderColumn . ' ' . $orderDir . ', p.id ASC
@@ -924,7 +1190,8 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $stmt = db()->prepare($sql);
     foreach ($params as $key => $value) {
-        $type = ($key === ':branch_id' || $key === ':status') ? PDO::PARAM_INT : PDO::PARAM_STR;
+        $integerKeys = [':branch_id', ':status', ':category_id', ':product_type', ':sale_allowed'];
+        $type = in_array($key, $integerKeys, true) ? PDO::PARAM_INT : PDO::PARAM_STR;
         $stmt->bindValue($key, $value, $type);
     }
     $stmt->bindValue(':start', $start, PDO::PARAM_INT);
@@ -939,6 +1206,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $row['sale_allowed'] = (int)$row['sale_allowed'];
         $row['purchase_price'] = (float)$row['purchase_price'];
         $row['status'] = (int)$row['status'];
+        $row['primary_conversion_qty'] = $row['primary_conversion_qty'] === null ? null : (float)$row['primary_conversion_qty'];
         $row['secondary_conversion_qty'] = $row['secondary_conversion_qty'] === null ? null : (float)$row['secondary_conversion_qty'];
         $row['ref'] = $ref;
         $row['edit_url'] = 'product-form.php?ref=' . $ref;
@@ -1000,16 +1268,19 @@ if ($method === 'POST') {
     $clean = product_validate($data, $branchId);
 
     $primaryBase = $clean['purchase_price'];
+    $primaryConversion = $clean['secondary_unit_id'] ? $clean['conversion_qty'] : 1.0;
     $secondaryBase = $clean['secondary_unit_id']
-        ? round($clean['purchase_price'] * $clean['conversion_qty'], 2)
+        ? round($clean['purchase_price'] / max(0.0001, $clean['conversion_qty']), 2)
         : null;
+    $opening = product_parse_opening_stock($data, $clean['secondary_unit_id'], $primaryConversion);
     $prices = product_parse_prices(
         $data,
         $branchId,
         $clean['sale_allowed'],
         $primaryBase,
         $secondaryBase,
-        $clean['conversion_qty']
+        $clean['conversion_qty'],
+        false
     );
 
     $code = product_generate_code($branchId);
@@ -1044,7 +1315,13 @@ if ($method === 'POST') {
         ]);
 
         $productId = (int)$pdo->lastInsertId();
-        $primaryProductUnitId = product_insert_unit($pdo, $productId, $clean['primary_unit_id'], 1, 1.0);
+        $primaryProductUnitId = product_insert_unit(
+            $pdo,
+            $productId,
+            $clean['primary_unit_id'],
+            1,
+            $primaryConversion
+        );
         $secondaryProductUnitId = null;
 
         if ($clean['secondary_unit_id']) {
@@ -1053,9 +1330,17 @@ if ($method === 'POST') {
                 $productId,
                 $clean['secondary_unit_id'],
                 2,
-                $clean['conversion_qty']
+                1.0
             );
         }
+
+        product_insert_opening_stock(
+            $pdo,
+            $branchId,
+            $productId,
+            $opening['base_qty'],
+            (int)$user['id']
+        );
 
         if ($clean['sale_allowed'] === 1) {
             product_sync_prices($pdo, $primaryProductUnitId, $prices['primary']);
@@ -1094,17 +1379,74 @@ if ($method === 'PUT') {
     $old = product_payload($branchId, $productId);
     $clean = product_validate($data, $branchId);
 
+    $usageLocked = product_usage_locked($branchId, $productId);
+    $oldUnits = $old['units'] ?? ['primary' => null, 'secondary' => null];
+    $oldUnitModel = product_unit_model($oldUnits);
+    $oldPrimaryUnitId = (int)($oldUnits['primary']['unit_id'] ?? 0);
+    $oldSecondaryUnitId = (int)($oldUnits['secondary']['unit_id'] ?? 0);
+    $requestedSecondaryId = (int)($clean['secondary_unit_id'] ?? 0);
+    $unitIdsChanged =
+        (int)$clean['primary_unit_id'] !== $oldPrimaryUnitId ||
+        $requestedSecondaryId !== $oldSecondaryUnitId;
+    $useLegacyDirection =
+        $oldUnitModel === 'legacy_secondary_larger' &&
+        !$unitIdsChanged;
+
+    $oldRelationshipConversion = $oldUnitModel === 'legacy_secondary_larger'
+        ? (float)($oldUnits['secondary']['conversion_qty'] ?? 1.0)
+        : (float)($oldUnits['primary']['conversion_qty'] ?? 1.0);
+    $requestedRelationshipConversion = $requestedSecondaryId > 0
+        ? (float)$clean['conversion_qty']
+        : 1.0;
+
+    if ($usageLocked) {
+        if (
+            $unitIdsChanged ||
+            abs($requestedRelationshipConversion - $oldRelationshipConversion) > 0.00005
+        ) {
+            json_error(
+                'Unit Details cannot be changed because this Product has already been used in a transaction or stock movement.',
+                409,
+                ['units' => 'Primary Unit, Secondary Unit and Conversion Qty are locked after product usage.']
+            );
+        }
+    }
+
     $primaryBase = $clean['purchase_price'];
+    $primaryConversion = $clean['secondary_unit_id']
+        ? ($useLegacyDirection ? 1.0 : $clean['conversion_qty'])
+        : 1.0;
+    $secondaryUnitConversion = $clean['secondary_unit_id']
+        ? ($useLegacyDirection ? $clean['conversion_qty'] : 1.0)
+        : 1.0;
     $secondaryBase = $clean['secondary_unit_id']
-        ? round($clean['purchase_price'] * $clean['conversion_qty'], 2)
+        ? round(
+            $useLegacyDirection
+                ? $clean['purchase_price'] * $clean['conversion_qty']
+                : $clean['purchase_price'] / max(0.0001, $clean['conversion_qty']),
+            2
+        )
         : null;
+    $opening = product_parse_opening_stock($data, $clean['secondary_unit_id'], $primaryConversion);
+    $existingOpening = product_opening_stock($branchId, $productId, $oldUnits);
+
+    if ($opening['base_qty'] > 0 && $useLegacyDirection) {
+        json_error('Convert this Product to the new Primary-larger / Secondary-base unit model before entering Opening Stock.', 409);
+    }
+    if ($opening['base_qty'] > 0 && $existingOpening['entered']) {
+        json_error('Opening Stock has already been entered for this Product and cannot be edited.', 409);
+    }
+    if ($opening['base_qty'] > 0 && $usageLocked && !$existingOpening['entered']) {
+        json_error('Opening Stock cannot be added after this Product has already been used. Use Stock Adjustment instead.', 409);
+    }
     $prices = product_parse_prices(
         $data,
         $branchId,
         $clean['sale_allowed'],
         $primaryBase,
         $secondaryBase,
-        $clean['conversion_qty']
+        $clean['conversion_qty'],
+        $useLegacyDirection
     );
 
     $pdo = db();
@@ -1145,7 +1487,7 @@ if ($method === 'PUT') {
             $productId,
             1,
             $clean['primary_unit_id'],
-            1.0,
+            $primaryConversion,
             'Primary Unit'
         );
 
@@ -1154,11 +1496,21 @@ if ($method === 'PUT') {
             $productId,
             2,
             $clean['secondary_unit_id'],
-            $clean['secondary_unit_id'] ? $clean['conversion_qty'] : 1.0,
+            $secondaryUnitConversion,
             'Secondary Unit'
         );
 
         if (!$primaryProductUnitId) json_error('Primary Unit configuration is invalid.', 409);
+
+        if ($opening['base_qty'] > 0) {
+            product_insert_opening_stock(
+                $pdo,
+                $branchId,
+                $productId,
+                $opening['base_qty'],
+                (int)$user['id']
+            );
+        }
 
         if ($clean['sale_allowed'] === 1) {
             product_sync_prices($pdo, $primaryProductUnitId, $prices['primary']);

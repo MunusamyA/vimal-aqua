@@ -67,6 +67,25 @@ $headScripts = [
     </a>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="receipt-indian-rupee"></i></div>
+        <div><div class="kpi-label">Payments</div><div class="kpi-value" id="kpiPayments">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="wallet-cards"></i></div>
+        <div><div class="kpi-label">Payment Amount</div><div class="kpi-value" id="kpiAmount">₹0.00</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="badge-percent"></i></div>
+        <div><div class="kpi-label">Discount</div><div class="kpi-value" id="kpiDiscount">₹0.00</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="circle-check-big"></i></div>
+        <div><div class="kpi-label">Settled</div><div class="kpi-value" id="kpiSettled">₹0.00</div></div>
+    </div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
@@ -83,7 +102,7 @@ $headScripts = [
                 </select>
             </div>
 
-            <div class="field col-2">
+            <div class="field col-3">
                 <label for="typeFilter">Payment For</label>
                 <select class="select" id="typeFilter">
                     <option value="">All</option>
@@ -93,12 +112,25 @@ $headScripts = [
                 </select>
             </div>
 
-            <div class="field col-2">
+            <div class="field col-3">
+                <label for="modeFilter">Payment Mode</label>
+                <select class="select" id="modeFilter">
+                    <option value="">All Modes</option>
+                    <option value="1">Cash</option>
+                    <option value="2">UPI</option>
+                    <option value="3">Bank</option>
+                    <option value="4">Cheque</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="form-row">
+            <div class="field col-6">
                 <label for="dateFrom">From Date</label>
                 <input class="input" id="dateFrom" type="date">
             </div>
 
-            <div class="field col-2">
+            <div class="field col-6">
                 <label for="dateTo">To Date</label>
                 <input class="input" id="dateTo" type="date">
             </div>
@@ -141,6 +173,14 @@ $headScripts = [
     var ACTION_CREATE=2;
     var ACTION_UPDATE=3;
     var ACTION_CANCEL=14;
+
+    function setSummary(summary){
+        summary=summary||{};
+        document.getElementById('kpiPayments').textContent=Number(summary.total_payments||0).toLocaleString('en-IN');
+        document.getElementById('kpiAmount').textContent='₹'+money(summary.payment_amount||0);
+        document.getElementById('kpiDiscount').textContent='₹'+money(summary.discount_amount||0);
+        document.getElementById('kpiSettled').textContent='₹'+money(summary.settled_amount||0);
+    }
 
     function esc(value){
         return String(value==null?'':value)
@@ -210,11 +250,13 @@ $headScripts = [
 
             var supplier=document.getElementById('supplierFilter').value;
             var type=document.getElementById('typeFilter').value;
+            var mode=document.getElementById('modeFilter').value;
             var from=document.getElementById('dateFrom').value;
             var to=document.getElementById('dateTo').value;
 
             if(supplier)params.set('supplier_ref',supplier);
             if(type)params.set('payment_type',type);
+            if(mode)params.set('payment_mode',mode);
             if(from)params.set('date_from',from);
             if(to)params.set('date_to',to);
 
@@ -228,11 +270,13 @@ $headScripts = [
                     actions=(result.data.form_actions||[]).map(Number);
                     document.getElementById('addPaymentButton').hidden=!has(actions,ACTION_CREATE);
                     fillSupplierFilter(result.data.suppliers||[]);
+                    setSummary(result.data.summary);
                     AppDataTable.applyExportPermissions(table,result.data.list_actions||[]);
                     callback(result.data.datatable);
                 })
                 .catch(function(error){
                     document.getElementById('addPaymentButton').hidden=true;
+                    setSummary({});
                     App.showError(error,'Unable to load Supplier Payments.');
                     callback({draw:data.draw,recordsTotal:0,recordsFiltered:0,data:[]});
                 });
@@ -293,7 +337,7 @@ $headScripts = [
         searchTimer=setTimeout(function(){table.search(input.value.trim()).draw();},350);
     });
 
-    ['supplierFilter','typeFilter','dateFrom','dateTo'].forEach(function(id){
+    ['supplierFilter','typeFilter','modeFilter','dateFrom','dateTo'].forEach(function(id){
         document.getElementById(id).addEventListener('change',function(){table.ajax.reload(null,true);});
     });
 

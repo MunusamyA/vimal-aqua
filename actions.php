@@ -81,7 +81,68 @@ $headScripts = [
     </form>
 </div>
 
-<div class="card table-card" style="padding:12px;overflow:hidden">
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="shield-check"></i></div>
+        <div>
+            <div class="kpi-label">Total Actions</div>
+            <div class="kpi-value" id="kpiTotal">0</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div>
+        <div>
+            <div class="kpi-label">Active Actions</div>
+            <div class="kpi-value" id="kpiActive">0</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="circle-off"></i></div>
+        <div>
+            <div class="kpi-label">Inactive Actions</div>
+            <div class="kpi-value" id="kpiInactive">0</div>
+        </div>
+    </div>
+
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="lock-keyhole"></i></div>
+        <div>
+            <div class="kpi-label">Built-in Actions</div>
+            <div class="kpi-value" id="kpiCore">0</div>
+        </div>
+    </div>
+</div>
+
+<div class="card table-card" style="overflow:hidden">
+    <div class="card-header" style="display:block;">
+        <div class="form-row" style="width:100%;">
+            <div class="field col-4">
+                <label for="actionSearch">Search</label>
+                <input class="input" id="actionSearch" type="text" autocomplete="off"
+                       placeholder="ID, action name, purpose...">
+            </div>
+
+            <div class="field col-4">
+                <label for="groupFilter">Group</label>
+                <select class="select" id="groupFilter">
+                    <option value="">All Groups</option>
+                </select>
+            </div>
+
+            <div class="field col-4">
+                <label for="statusFilter">Status</label>
+                <select class="select" id="statusFilter">
+                    <option value="">All</option>
+                    <option value="1">Active</option>
+                    <option value="0">Inactive</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="app-table-wrap">
     <table id="actionTable" class="display data-table" style="width:100%">
         <thead>
             <tr>
@@ -95,6 +156,7 @@ $headScripts = [
             </tr>
         </thead>
     </table>
+    </div>
 </div>
 <script src="assets/js/validation.js"></script>
 <script>
@@ -106,6 +168,11 @@ $headScripts = [
     var editor = document.getElementById("actionEditor");
     var newButton = document.getElementById("newAction");
     var saveButton = document.getElementById("saveAction");
+    var actionSearch = document.getElementById("actionSearch");
+    var groupFilter = document.getElementById("groupFilter");
+    var statusFilter = document.getElementById("statusFilter");
+    var searchTimer = null;
+    var groupsLoaded = false;
 
     function has(id) {
         return allowed.map(Number).indexOf(Number(id)) !== -1;
@@ -114,12 +181,41 @@ $headScripts = [
     function fillGroups() {
         var select = document.getElementById("groupSelect");
         select.innerHTML = '<option value="">Select group</option>';
+
         Object.keys(groups).forEach(function (id) {
             var option = document.createElement("option");
             option.value = id;
             option.textContent = id + " - " + groups[id];
             select.appendChild(option);
         });
+
+        if (!groupsLoaded) {
+            groupsLoaded = true;
+            groupFilter.innerHTML = '<option value="">All Groups</option>';
+
+            Object.keys(groups).forEach(function (id) {
+                var option = document.createElement("option");
+                option.value = id;
+                option.textContent = id + " - " + groups[id];
+                groupFilter.appendChild(option);
+            });
+        }
+    }
+
+    function setSummary(summary) {
+        summary = summary || {};
+
+        document.getElementById("kpiTotal").textContent =
+            Number(summary.total_actions || 0).toLocaleString("en-IN");
+
+        document.getElementById("kpiActive").textContent =
+            Number(summary.active_actions || 0).toLocaleString("en-IN");
+
+        document.getElementById("kpiInactive").textContent =
+            Number(summary.inactive_actions || 0).toLocaleString("en-IN");
+
+        document.getElementById("kpiCore").textContent =
+            Number(summary.core_actions || 0).toLocaleString("en-IN");
     }
 
     function openNew() {
@@ -175,8 +271,9 @@ $headScripts = [
 
     var table = AppDataTable.init("#actionTable", {
         serverSide: true,
+        searching: true,
         searchDelay: 300,
-        appSearchPlaceholder: "Search permission actions...",
+        appSearch: false,
         appLoaderText: "Loading actions...",
         pageLength: 25,
         lengthMenu: [[10,25,50,100],[10,25,50,100]],
@@ -190,6 +287,15 @@ $headScripts = [
             params.set("start", data.start);
             params.set("length", data.length);
             params.set("search[value]", data.search.value || "");
+
+            if (groupFilter.value !== "") {
+                params.set("group_id", groupFilter.value);
+            }
+
+            if (statusFilter.value !== "") {
+                params.set("status", statusFilter.value);
+            }
+
             if (data.order && data.order[0]) {
                 params.set("order[0][column]", data.order[0].column);
                 params.set("order[0][dir]", data.order[0].dir);
@@ -199,8 +305,10 @@ $headScripts = [
                 groups = result.data.groups || {};
                 fillGroups();
                 newButton.style.display = has(2) ? "inline-flex" : "none";
+                setSummary(result.data.summary);
                 callback(result.data.datatable);
             }).catch(function (error) {
+                setSummary({});
                 App.showError(error, "Unable to load permission actions.");
                 callback({ draw: data.draw, recordsTotal: 0, recordsFiltered: 0, data: [] });
             });
@@ -235,6 +343,32 @@ $headScripts = [
             }}
         ],
         language: { emptyTable: "No permission actions found.", zeroRecords: "No matching actions found." }
+    });
+
+    (function removeDefaultSearchRow() {
+        var tableElement = document.getElementById("actionTable");
+        var card = tableElement ? tableElement.closest(".table-card") : null;
+        var row = card ? card.querySelector(".app-table-search-row") : null;
+
+        if (row) {
+            row.remove();
+        }
+    })();
+
+    actionSearch.addEventListener("input", function () {
+        var input = this;
+
+        clearTimeout(searchTimer);
+
+        searchTimer = setTimeout(function () {
+            table.search(input.value.trim()).draw();
+        }, 300);
+    });
+
+    [groupFilter, statusFilter].forEach(function (field) {
+        field.addEventListener("change", function () {
+            table.ajax.reload(null, true);
+        });
     });
 
     $("#actionTable").on("click", ".js-edit", function () {

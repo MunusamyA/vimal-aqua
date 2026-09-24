@@ -1,49 +1,268 @@
 <?php
-require_once __DIR__ . '/include/web-config.php'; $pageTitle = 'Business List'; ?>
+require_once __DIR__ . '/include/web-config.php';
+
+$pageTitle = 'Business List';
+
+$headStyles = [
+    'https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css'
+];
+
+$headScripts = [
+    'https://code.jquery.com/jquery-3.7.1.min.js',
+    'https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js'
+];
+?>
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="theme-color" content="<?php echo web_h(app_theme_color()); ?>">
-    <title><?php echo web_h((string)($pageTitle ?? app_name())); ?> · <?php echo web_h(app_name()); ?></title>
-    <?php render_frontend_config_script(); ?>
-    <script src="assets/js/runtime.js"></script>
-    <?php foreach ((isset($headStyles) && is_array($headStyles) ? $headStyles : []) as $styleUrl): ?>
-    <link rel="stylesheet" href="<?php echo htmlspecialchars((string)$styleUrl, ENT_QUOTES, 'UTF-8'); ?>">
-    <?php endforeach; ?>
-    <link rel="stylesheet" href="assets/css/core.css">
-    <link rel="stylesheet" href="assets/css/components.css">
-    <link rel="stylesheet" href="assets/css/theme.css">
-    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-    <?php foreach ((isset($headScripts) && is_array($headScripts) ? $headScripts : []) as $scriptUrl): ?>
-    <script src="<?php echo htmlspecialchars((string)$scriptUrl, ENT_QUOTES, 'UTF-8'); ?>"></script>
-    <?php endforeach; ?>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="<?php echo web_h(app_theme_color()); ?>">
+<title><?php echo web_h($pageTitle); ?> · <?php echo web_h(app_name()); ?></title>
+<?php render_frontend_config_script(); ?>
+<script src="assets/js/runtime.js"></script>
+<?php foreach ($headStyles as $url): ?><link rel="stylesheet" href="<?php echo web_h($url); ?>"><?php endforeach; ?>
+<link rel="stylesheet" href="assets/css/core.css">
+<link rel="stylesheet" href="assets/css/components.css">
+<link rel="stylesheet" href="assets/css/theme.css">
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+<?php foreach ($headScripts as $url): ?><script src="<?php echo web_h($url); ?>"></script><?php endforeach; ?>
 </head>
 <body>
 <div class="app-shell">
 <?php require __DIR__ . '/include/sidebar.php'; ?>
-    <main class="main-stage">
+<main class="main-stage">
 <?php require __DIR__ . '/include/topbar.php'; ?>
-        <section class="page-content">
+<section class="page-content">
+
 <script src="assets/js/toaster.js"></script>
 <script src="assets/js/app.js"></script>
 <script src="assets/js/theme.js"></script>
 <script src="assets/js/layout.js"></script>
 <script src="assets/js/datatable.js"></script>
 
-<div class="page-head"><h1>Business List</h1><a class="btn btn-primary" id="addButton" href="business-form.php">Add Business</a></div>
-<div class="card table-card"><table><thead><tr><th>Business</th><th>Code</th><th>Contact</th><th>Branches</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table></div>
+<div class="page-head">
+    <div>
+        <h1>Business List</h1>
+        <p>Manage businesses and branch totals.</p>
+    </div>
+    <a class="btn btn-primary" id="addButton" href="business-form.php" style="display:none">
+        <i data-lucide="plus"></i>Add Business
+    </a>
+</div>
+
+<div class="kpi-grid">
+    <div class="card kpi-card"><div class="kpi-icon blue"><i data-lucide="building-2"></i></div><div><div class="kpi-label">Total Businesses</div><div class="kpi-value" id="kpiTotal">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div><div><div class="kpi-label">Active Businesses</div><div class="kpi-value" id="kpiActive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon orange"><i data-lucide="circle-off"></i></div><div><div class="kpi-label">Inactive Businesses</div><div class="kpi-value" id="kpiInactive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon teal"><i data-lucide="git-branch"></i></div><div><div class="kpi-label">Total Branches</div><div class="kpi-value" id="kpiBranches">0</div></div></div>
+</div>
+
+<div class="card table-card">
+    <div class="card-header" style="display:block;">
+        <div class="form-row" style="width:100%;">
+            <div class="field col-8">
+                <label for="businessSearch">Search</label>
+                <input class="input" id="businessSearch" type="text" autocomplete="off" placeholder="Business, code, email, mobile...">
+            </div>
+            <div class="field col-4">
+                <label for="statusFilter">Status</label>
+                <select class="select" id="statusFilter">
+                    <option value="">All</option>
+                    <option value="1">Active</option>
+                    <option value="0">Inactive</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div class="app-table-wrap">
+        <table id="businessTable" class="display data-table" style="width:100%">
+            <thead>
+                <tr>
+                    <th>Business</th>
+                    <th>Code</th>
+                    <th>Contact</th>
+                    <th>Branches</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+        </table>
+    </div>
+</div>
+
 <script>
-(function(){"use strict";
-var allowed=[],current={};function has(id){return allowed.indexOf(Number(id))!==-1;}function icons(){if(window.lucide)window.lucide.createIcons();}
-async function load(){var body=document.getElementById("rows");try{var result=await App.api("api/businesses.php");allowed=(result.data.allowed_actions||[]).map(Number);current=result.data.current_user||{};document.getElementById("addButton").style.display=has(2)&&Number(current.role_type)===2?"inline-flex":"none";body.innerHTML="";(result.data.businesses||[]).forEach(function(item){var row=document.createElement("tr");[item.company_name,item.company_code,[item.email,item.mobile].filter(Boolean).join(" · ")||"-",item.branch_count].forEach(function(value){var td=document.createElement("td");td.textContent=value;row.appendChild(td);});var status=document.createElement("td");status.innerHTML='<span class="badge '+(Number(item.status)===1?'on':'off')+'">'+(Number(item.status)===1?'Active':'Inactive')+'</span>';row.appendChild(status);var actions=document.createElement("td");actions.className="table-action-icons";if(has(3))actions.appendChild(App.createIconAction({href:"business-form.php?id="+item.id,icon:"pencil",label:"Edit business"}));if(has(3)&&Number(current.role_type)===2)actions.appendChild(App.createIconAction({icon:Number(item.status)===1?"circle-off":"circle-check",label:Number(item.status)===1?"Deactivate business":"Activate business",tone:Number(item.status)===1?"danger":"success",onClick:function(){changeStatus(item);}}));row.appendChild(actions);body.appendChild(row);});if(!(result.data.businesses||[]).length)body.innerHTML='<tr><td colspan="6" class="empty">No businesses found.</td></tr>';icons();}catch(error){body.innerHTML='<tr><td colspan="6" class="empty">Unable to load businesses.</td></tr>';App.showError(error);}}
-async function changeStatus(item){var next=Number(item.status)===1?0:1;if(!confirm((next?"Activate ":"Deactivate ")+'"'+item.company_name+'"?'))return;try{var result=await App.api("api/businesses.php",{method:"PATCH",body:{id:Number(item.id),status:next}});showToast(result.message,{type:"success",duration:3});load();}catch(error){App.showError(error);}}load();
-})();
+(function($,window,document){
+'use strict';
+
+if(!window.AppDataTable||!AppDataTable.ensureAvailable())return;
+
+var table=null;
+var allowed=[];
+var current={};
+var searchTimer=null;
+var has=AppDataTable.has;
+
+function escapeHtml(value){
+    return String(value===null||value===undefined?'':value)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#039;');
+}
+
+function setSummary(summary){
+    summary=summary||{};
+    document.getElementById('kpiTotal').textContent=Number(summary.total_businesses||0).toLocaleString('en-IN');
+    document.getElementById('kpiActive').textContent=Number(summary.active_businesses||0).toLocaleString('en-IN');
+    document.getElementById('kpiInactive').textContent=Number(summary.inactive_businesses||0).toLocaleString('en-IN');
+    document.getElementById('kpiBranches').textContent=Number(summary.total_branches||0).toLocaleString('en-IN');
+}
+
+function params(data){
+    var p=new URLSearchParams();
+    p.set('datatable','1');
+    p.set('draw',data.draw);
+    p.set('start',data.start);
+    p.set('length',data.length);
+    p.set('search[value]',data.search.value||'');
+
+    var status=document.getElementById('statusFilter').value;
+    if(status!=='')p.set('status',status);
+
+    if(data.order&&data.order[0]){
+        p.set('order[0][column]',data.order[0].column);
+        p.set('order[0][dir]',data.order[0].dir);
+    }
+
+    return p;
+}
+
+function init(){
+    table=AppDataTable.init('#businessTable',{
+        serverSide:true,
+        searching:true,
+        searchDelay:350,
+        appSearch:false,
+        pageLength:10,
+        lengthMenu:[[10,25,50,100],[10,25,50,100]],
+        order:[[0,'asc']],
+        scrollX:true,
+        autoWidth:false,
+        buttons:[],
+        ajax:function(data,callback){
+            App.api('api/businesses.php?'+params(data).toString())
+                .then(function(result){
+                    allowed=(result.data.allowed_actions||[]).map(Number);
+                    current=result.data.current_user||{};
+                    document.getElementById('addButton').style.display=
+                        has(allowed,2)&&Number(current.role_type)===2?'inline-flex':'none';
+                    setSummary(result.data.summary);
+                    callback(result.data.datatable);
+                })
+                .catch(function(error){
+                    setSummary({});
+                    App.showError(error,'Unable to load businesses.');
+                    callback({draw:data.draw,recordsTotal:0,recordsFiltered:0,data:[]});
+                });
+        },
+        columns:[
+            {data:'company_name',defaultContent:'-',render:function(v,t){return t==='display'?escapeHtml(v||'-'):v;}},
+            {data:'company_code',defaultContent:'-',render:function(v,t){return t==='display'?escapeHtml(v||'-'):v;}},
+            {data:null,orderable:false,render:function(d,t,row){var text=[row.email,row.mobile].filter(Boolean).join(' · ')||'-';return t==='display'?escapeHtml(text):text;}},
+            {data:'branch_count',className:'dt-body-right',render:function(v){return Number(v||0);}},
+            {data:'status',render:function(v,t){
+                if(t!=='display')return Number(v);
+                return Number(v)===1
+                    ?'<span class="dt-status active">Active</span>'
+                    :'<span class="dt-status inactive">Inactive</span>';
+            }},
+            {data:null,orderable:false,searchable:false,className:'table-action-icons',render:function(d,t,row){
+                if(t!=='display')return '';
+                var html='';
+
+                if(has(allowed,3)){
+                    html+=App.iconActionHtml({
+                        href:'business-form.php?id='+Number(row.id),
+                        icon:'pencil',
+                        label:'Edit business'
+                    });
+                }
+
+                if(has(allowed,3)&&Number(current.role_type)===2){
+                    html+='<button type="button" class="table-icon-action '+(Number(row.status)===1?'danger':'')+
+                        ' js-business-status" data-id="'+Number(row.id)+'" data-name="'+escapeHtml(row.company_name)+
+                        '" data-status="'+Number(row.status)+'" title="'+(Number(row.status)===1?'Deactivate':'Activate')+
+                        ' Business"><i data-lucide="'+(Number(row.status)===1?'circle-off':'circle-check')+'"></i></button>';
+                }
+
+                return html||'<span class="muted">View only</span>';
+            }}
+        ],
+        language:{
+            emptyTable:'No businesses found.',
+            zeroRecords:'No matching businesses found.',
+            processing:'Loading businesses...'
+        },
+        drawCallback:function(){
+            if(window.lucide)window.lucide.createIcons();
+        }
+    });
+
+    var card=document.getElementById('businessTable').closest('.table-card');
+    var defaultSearch=card?card.querySelector('.app-table-search-row'):null;
+    if(defaultSearch)defaultSearch.remove();
+}
+
+document.getElementById('businessSearch').addEventListener('input',function(){
+    var field=this;
+    clearTimeout(searchTimer);
+    searchTimer=setTimeout(function(){
+        if(table)table.search(field.value.trim()).draw();
+    },350);
+});
+
+document.getElementById('statusFilter').addEventListener('change',function(){
+    if(table)table.ajax.reload(null,true);
+});
+
+document.addEventListener('click',function(event){
+    var button=event.target.closest('.js-business-status');
+    if(!button)return;
+
+    var currentStatus=Number(button.getAttribute('data-status')||0);
+    var next=currentStatus===1?0:1;
+    var name=button.getAttribute('data-name')||'Business';
+
+    if(!confirm((next?'Activate ':'Deactivate ')+'"'+name+'"?'))return;
+
+    button.disabled=true;
+
+    App.api('api/businesses.php',{
+        method:'PATCH',
+        body:{
+            id:Number(button.getAttribute('data-id')||0),
+            status:next
+        }
+    }).then(function(result){
+        if(window.showToast)showToast(result.message||'Status updated successfully.',{type:'success',duration:2});
+        table.ajax.reload(null,false);
+    }).catch(function(error){
+        App.showError(error,'Unable to update Business status.');
+    }).finally(function(){
+        button.disabled=false;
+    });
+});
+
+init();
+})(window.jQuery,window,document);
 </script>
-        </section>
+
+</section>
 <?php require __DIR__ . '/include/footer.php'; ?>
-    </main>
+</main>
 </div>
 <script>if(window.lucide){window.lucide.createIcons();}</script>
 </body>

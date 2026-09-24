@@ -55,6 +55,50 @@ function line_supply_items(int $branchId,int $supplyId,int $vehicleId,int $tripS
         foreach(['primary_qty','secondary_qty','primary_conversion_qty','secondary_conversion_qty','loaded_base_qty','returned_base_qty','shortage_base_qty','empty_returned_to_plant_qty','empty_shortage_qty','damaged_returned_to_plant_qty','damaged_shortage_qty'] as $key){
             $row[$key]=(float)$row[$key];
         }
+
+        /*
+         * Remap historical Line Supply rows that were saved with the old
+         * PCS-primary / Box-secondary orientation.
+         */
+        $current=line_supply_product_bundle($branchId,(int)$row['product_id']);
+        $currentPrimaryId=(int)$current['primary_unit']['product_unit_id'];
+        $currentSecondaryId=!empty($current['secondary_unit'])
+            ?(int)$current['secondary_unit']['product_unit_id']
+            :0;
+
+        $storedPrimaryId=(int)$row['primary_product_unit_id'];
+        $storedSecondaryId=(int)($row['secondary_product_unit_id']??0);
+
+        if(
+            $currentSecondaryId>0 &&
+            $storedPrimaryId===$currentSecondaryId &&
+            $storedSecondaryId===$currentPrimaryId
+        ){
+            $tmpQty=$row['primary_qty'];
+            $row['primary_qty']=$row['secondary_qty'];
+            $row['secondary_qty']=$tmpQty;
+
+            $tmpConv=$row['primary_conversion_qty'];
+            $row['primary_conversion_qty']=$row['secondary_conversion_qty'];
+            $row['secondary_conversion_qty']=$tmpConv;
+        }
+
+        $row['primary_product_unit_id']=$currentPrimaryId;
+        $row['secondary_product_unit_id']=$currentSecondaryId>0?$currentSecondaryId:null;
+        $row['primary_conversion_qty']=(float)$current['primary_unit']['conversion_qty'];
+        $row['secondary_conversion_qty']=$currentSecondaryId>0
+            ?(float)$current['secondary_unit']['conversion_qty']
+            :0.0;
+        $row['primary_unit_name']=(string)$current['primary_unit']['unit_name'];
+        $row['primary_short_name']=(string)$current['primary_unit']['short_name'];
+        $row['secondary_unit_name']=$currentSecondaryId>0
+            ?(string)$current['secondary_unit']['unit_name']
+            :null;
+        $row['secondary_short_name']=$currentSecondaryId>0
+            ?(string)$current['secondary_unit']['short_name']
+            :null;
+        $row['plant_stock']=aqua_plant_stock($branchId,(int)$row['product_id']);
+
         if($tripStatus<4){
             $row['truck_stock']=aqua_vehicle_stock($branchId,$vehicleId,$supplyId,(int)$row['product_id']);
             $row['expected_return_qty']=$row['truck_stock'];
@@ -136,6 +180,68 @@ function line_supply_options(int $branchId): array
 }
 
 
+function line_supply_product_bundle(int $branchId,int $productId): array
+{
+    $product=aqua_product_bundle($branchId,$productId,null);
+
+    /*
+     * FINAL UNIT STANDARD FOR TRUCK LOADING
+     * -------------------------------------
+     * Primary/Main Unit   = larger unit
+     * Secondary/Base Unit = smaller unit
+     *
+     * Legacy products can still be stored as:
+     *   Primary PCS conversion 1
+     *   Secondary Box conversion 12
+     *
+     * Normalize only the transaction view. Do not rewrite historical
+     * Product Master records here.
+     */
+    if(
+        !empty($product['secondary_unit']) &&
+        (float)$product['secondary_unit']['conversion_qty'] >
+        (float)$product['primary_unit']['conversion_qty']
+    ){
+        $oldPrimary=$product['primary_unit'];
+        $product['primary_unit']=$product['secondary_unit'];
+        $product['secondary_unit']=$oldPrimary;
+        $product['legacy_unit_swapped']=1;
+    }else{
+        $product['legacy_unit_swapped']=0;
+    }
+
+    if(!empty($product['primary_unit'])){
+        $product['primary_unit']['unit_type']=1;
+    }
+    if(!empty($product['secondary_unit'])){
+        $product['secondary_unit']['unit_type']=2;
+    }
+
+    return $product;
+}
+
+function line_supply_products(int $branchId): array
+{
+    $stmt=db()->prepare(
+        'SELECT id
+         FROM products
+         WHERE branch_id=:branch_id
+           AND status=1
+           AND sale_allowed=1
+         ORDER BY product_name'
+    );
+    $stmt->execute([':branch_id'=>$branchId]);
+
+    $rows=[];
+    foreach($stmt->fetchAll(PDO::FETCH_COLUMN) as $productId){
+        $product=line_supply_product_bundle($branchId,(int)$productId);
+        $product['plant_stock']=aqua_plant_stock($branchId,(int)$productId);
+        $rows[]=$product;
+    }
+
+    return $rows;
+}
+
 function line_supply_return_options(int $branchId,array $access,array $context): array
 {
     $scope=aqua_line_supply_scope_sql($access,$context,'ls');
@@ -173,7 +279,7 @@ function line_supply_parse_loading_items(array $data,int $branchId): array
         if($productId<1) json_error('Product is required.',422);
         if(isset($seen[$productId])) json_error('The same Product cannot be loaded more than once.',422);
         $seen[$productId]=true;
-        $product=aqua_product_bundle($branchId,$productId,null);
+        $product=line_supply_product_bundle($branchId,$productId);
         $primary=aqua_decimal($item['primary_qty']??0,'items','Primary Qty',3,false);
         $secondary=aqua_decimal($item['secondary_qty']??0,'items','Secondary Qty',3,false);
         if($product['secondary_unit']===null && $secondary>0) json_error('Selected Product has no Secondary Unit.',422);
@@ -240,7 +346,14 @@ function line_supply_save_loading(array $data,array $access,array $context,?int 
             foreach($items as $item){
                 $available=aqua_plant_stock($branchId,(int)$item['product_id']);
                 if((float)$item['loaded_base_qty']>$available+0.0005){
-                    json_error($item['product']['product_name'].' Plant Stock is insufficient. Available: '.number_format($available,3,'.',''),409);
+                    json_error(
+                        $item['product']['product_name'].
+                        ' Plant Stock is insufficient. Available: '.
+                        number_format($available,3,'.','').
+                        ', Required: '.
+                        number_format((float)$item['loaded_base_qty'],3,'.',''),
+                        409
+                    );
                 }
             }
         }
@@ -429,14 +542,32 @@ if($method==='GET' && isset($_GET['return_options'])){
     ]);
 }
 
+if($method==='GET' && isset($_GET['product_context'])){
+    $access=require_permission('line-supply-list.php',ACTION_VIEW);
+    $context=aqua_sales_context($access['user']);
+    $branchId=(int)$context['branch_id'];
+    $productId=(int)($_GET['product_id']??0);
+
+    if($productId<1){
+        json_error('Select Product.',422,['product_id'=>'Select Product.']);
+    }
+
+    $product=line_supply_product_bundle($branchId,$productId);
+    $product['plant_stock']=aqua_plant_stock($branchId,$productId);
+
+    json_success('Truck Loading Product loaded.',[
+        'product'=>$product,
+        'allowed_actions'=>$access['actions'],
+        'context'=>$context,
+    ]);
+}
+
 if($method==='GET' && isset($_GET['options'])){
     $access=require_permission('line-supply-list.php',ACTION_VIEW);
     $context=aqua_sales_context($access['user']);
     $branchId=(int)$context['branch_id'];
     $options=line_supply_options($branchId);
-    $products=aqua_sales_products($branchId,null);
-    foreach($products as &$product) $product['plant_stock']=aqua_plant_stock($branchId,(int)$product['id']);
-    unset($product);
+    $products=line_supply_products($branchId);
     json_success('Line Supply options loaded.',[
         'vehicles'=>$options['vehicles'],'lines'=>$options['lines'],'products'=>$products,
         'allowed_actions'=>$access['actions'],'can_line_sale'=>line_supply_can_sale($access['user']),'context'=>$context,

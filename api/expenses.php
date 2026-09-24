@@ -404,6 +404,23 @@ if($method==='GET' && isset($_GET['datatable'])){
     $countStmt->execute($params);
     $recordsFiltered=(int)$countStmt->fetchColumn();
 
+    /*
+     * Filtered statistics for Expense List KPI cards.
+     * Cancelled expenses are kept separate because their linked
+     * Money Out transactions are removed/reversed by the API.
+     */
+    $summaryStmt=db()->prepare(
+        'SELECT
+            COUNT(*) AS expense_count,
+            COALESCE(SUM(CASE WHEN e.status=1 THEN 1 ELSE 0 END),0) AS active_count,
+            COALESCE(SUM(CASE WHEN e.status=0 THEN 1 ELSE 0 END),0) AS cancelled_count,
+            COALESCE(SUM(CASE WHEN e.status=1 THEN e.amount ELSE 0 END),0) AS active_amount
+         FROM expenses e
+         WHERE '.implode(' AND ',$where)
+    );
+    $summaryStmt->execute($params);
+    $summary=$summaryStmt->fetch(PDO::FETCH_ASSOC)?:[];
+
     $orderMap=[0=>'e.id',1=>'e.expense_date',2=>'e.expense_name',3=>'payment_modes',4=>'payment_accounts',5=>'e.amount',6=>'e.remarks',7=>'e.status'];
     $orderCol=(int)($_GET['order'][0]['column']??1);
     $orderDir=strtolower((string)($_GET['order'][0]['dir']??'desc'))==='asc'?'ASC':'DESC';
@@ -441,6 +458,12 @@ if($method==='GET' && isset($_GET['datatable'])){
     }
 
     json_success('Expenses loaded.',[
+        'summary'=>[
+            'expense_count'=>(int)($summary['expense_count']??0),
+            'active_count'=>(int)($summary['active_count']??0),
+            'cancelled_count'=>(int)($summary['cancelled_count']??0),
+            'active_amount'=>(float)($summary['active_amount']??0),
+        ],
         'datatable'=>[
             'draw'=>$draw,
             'recordsTotal'=>$recordsTotal,

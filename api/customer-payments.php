@@ -862,31 +862,108 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $access = payment_access(ACTION_VIEW);
     $context = aqua_sales_context($access['user']);
     $branchId = (int)$context['branch_id'];
+
     $draw = (int)($_GET['draw'] ?? 1);
     $start = max(0, (int)($_GET['start'] ?? 0));
     $length = max(1, min(100, (int)($_GET['length'] ?? 10)));
     $search = trim((string)($_GET['search']['value'] ?? ''));
-    $status = isset($_GET['status']) ? (int)$_GET['status'] : -1;
+
+    $statusRaw = trim((string)($_GET['status'] ?? ''));
+    $customerRaw = trim((string)($_GET['customer_id'] ?? ''));
+    $paymentModeRaw = trim((string)($_GET['payment_mode'] ?? ''));
+    $dateFromRaw = trim((string)($_GET['date_from'] ?? ''));
+    $dateToRaw = trim((string)($_GET['date_to'] ?? ''));
 
     $where = ['cp.branch_id=:branch_id'];
     $params = [':branch_id'=>$branchId];
-    if ($status === 0 || $status === 1) {
+
+    if ($statusRaw !== '') {
+        $status = (int)$statusRaw;
+        if (!in_array($status, [0,1], true)) {
+            json_error('Invalid Customer Payment status.', 422);
+        }
         $where[] = 'cp.status=:status';
         $params[':status'] = $status;
     }
+
+    if ($customerRaw !== '') {
+        $customerId = (int)$customerRaw;
+        if ($customerId < 1) {
+            json_error('Invalid Customer.', 422);
+        }
+        aqua_customer($branchId, $customerId);
+        $where[] = 'cp.customer_id=:customer_id';
+        $params[':customer_id'] = $customerId;
+    }
+
+    if ($paymentModeRaw !== '') {
+        $paymentMode = (int)$paymentModeRaw;
+        if (!in_array($paymentMode, [1,2,3,4], true)) {
+            json_error('Invalid Payment Mode.', 422);
+        }
+        $where[] = 'EXISTS (
+            SELECT 1
+            FROM customer_payment_details fpd
+            WHERE fpd.customer_payment_id=cp.id
+              AND fpd.payment_mode=:payment_mode
+              AND fpd.amount>0
+        )';
+        $params[':payment_mode'] = $paymentMode;
+    }
+
+    if ($dateFromRaw !== '') {
+        $dateFrom = aqua_date($dateFromRaw, 'date_from');
+        $where[] = 'cp.payment_date>=:date_from';
+        $params[':date_from'] = $dateFrom;
+    }
+
+    if ($dateToRaw !== '') {
+        $dateTo = aqua_date($dateToRaw, 'date_to');
+        $where[] = 'cp.payment_date<=:date_to';
+        $params[':date_to'] = $dateTo;
+    }
+
+    if ($dateFromRaw !== '' && $dateToRaw !== '' && $params[':date_from'] > $params[':date_to']) {
+        json_error('From Date cannot be after To Date.', 422);
+    }
+
     if ($search !== '') {
-        $where[] = '(cp.payment_no LIKE :q OR c.customer_name LIKE :q OR c.customer_code LIKE :q OR c.mobile LIKE :q)';
+        $where[] = '(cp.payment_no LIKE :q OR c.customer_name LIKE :q OR c.customer_code LIKE :q OR c.mobile LIKE :q OR cp.remarks LIKE :q)';
         $params[':q'] = '%' . $search . '%';
     }
 
     $from = ' FROM customer_payments cp
               INNER JOIN customers c ON c.id=cp.customer_id AND c.branch_id=cp.branch_id ';
+
     $count = db()->prepare('SELECT COUNT(*)' . $from . ' WHERE ' . implode(' AND ', $where));
-    $count->execute($params);
+    foreach ($params as $key=>$value) {
+        $isInt = in_array($key, [':branch_id',':status',':customer_id',':payment_mode'], true);
+        $count->bindValue($key, $value, $isInt ? PDO::PARAM_INT : PDO::PARAM_STR);
+    }
+    $count->execute();
     $filtered = (int)$count->fetchColumn();
+
     $totalStmt = db()->prepare('SELECT COUNT(*) FROM customer_payments WHERE branch_id=:branch_id');
     $totalStmt->execute([':branch_id'=>$branchId]);
     $total = (int)$totalStmt->fetchColumn();
+
+    $summarySql = 'SELECT
+                        COUNT(*) AS receipt_count,
+                        COALESCE(SUM(CASE WHEN cp.status=1 THEN 1 ELSE 0 END),0) AS active_count,
+                        COALESCE(SUM(CASE WHEN cp.status=0 THEN 1 ELSE 0 END),0) AS cancelled_count,
+                        COALESCE(SUM(CASE WHEN cp.status=1 THEN cp.amount ELSE 0 END),0) AS received_amount,
+                        COALESCE(SUM(CASE WHEN cp.status=1 THEN cp.discount_amount ELSE 0 END),0) AS discount_amount,
+                        COALESCE(SUM(CASE WHEN cp.status=1 THEN cp.amount + cp.discount_amount ELSE 0 END),0) AS settlement_amount
+                   ' . $from . '
+                   WHERE ' . implode(' AND ', $where);
+
+    $summaryStmt = db()->prepare($summarySql);
+    foreach ($params as $key=>$value) {
+        $isInt = in_array($key, [':branch_id',':status',':customer_id',':payment_mode'], true);
+        $summaryStmt->bindValue($key, $value, $isInt ? PDO::PARAM_INT : PDO::PARAM_STR);
+    }
+    $summaryStmt->execute();
+    $summary = $summaryStmt->fetch() ?: [];
 
     $sql = 'SELECT cp.id,cp.payment_no,cp.payment_date,cp.amount,cp.discount_type,cp.discount_value,cp.discount_amount,cp.status,cp.remarks,
                    c.customer_code,c.customer_name,
@@ -898,9 +975,11 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             WHERE ' . implode(' AND ', $where) . '
             ORDER BY cp.payment_date DESC,cp.id DESC
             LIMIT :start,:length';
+
     $stmt = db()->prepare($sql);
     foreach ($params as $key=>$value) {
-        $stmt->bindValue($key, $value, $key === ':branch_id' || $key === ':status' ? PDO::PARAM_INT : PDO::PARAM_STR);
+        $isInt = in_array($key, [':branch_id',':status',':customer_id',':payment_mode'], true);
+        $stmt->bindValue($key, $value, $isInt ? PDO::PARAM_INT : PDO::PARAM_STR);
     }
     $stmt->bindValue(':start', $start, PDO::PARAM_INT);
     $stmt->bindValue(':length', $length, PDO::PARAM_INT);
@@ -909,7 +988,9 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $rows = [];
     foreach ($stmt->fetchAll() as $row) {
         $id = (int)$row['id'];
-        foreach (['amount','discount_value','discount_amount','cash_amount','upi_amount','bank_amount','cheque_amount'] as $key) $row[$key] = (float)$row[$key];
+        foreach (['amount','discount_value','discount_amount','cash_amount','upi_amount','bank_amount','cheque_amount'] as $key) {
+            $row[$key] = (float)$row[$key];
+        }
         $row['discount_type'] = (int)$row['discount_type'];
         $row['discount_type_label'] = payment_discount_type_label($row['discount_type']);
         $row['settlement_amount'] = round($row['amount'] + $row['discount_amount'], 2);
@@ -922,6 +1003,14 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     json_success('Customer Payments loaded.', [
         'allowed_actions'=>$access['actions'],
+        'summary'=>[
+            'receipt_count'=>(int)($summary['receipt_count'] ?? 0),
+            'active_count'=>(int)($summary['active_count'] ?? 0),
+            'cancelled_count'=>(int)($summary['cancelled_count'] ?? 0),
+            'received_amount'=>(float)($summary['received_amount'] ?? 0),
+            'discount_amount'=>(float)($summary['discount_amount'] ?? 0),
+            'settlement_amount'=>(float)($summary['settlement_amount'] ?? 0),
+        ],
         'datatable'=>[
             'draw'=>$draw,
             'recordsTotal'=>$total,

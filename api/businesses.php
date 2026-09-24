@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/include/bootstrap.php';
@@ -8,28 +9,36 @@ function business_record_for_user(array $user, int $companyId): array
     $stmt = db()->prepare(
         'SELECT c.*,
                 (SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id) AS branch_count
-         FROM companies c WHERE c.id = :id LIMIT 1'
+         FROM companies c
+         WHERE c.id = :id
+         LIMIT 1'
     );
     $stmt->execute([':id' => $companyId]);
-    $company = $stmt->fetch();
+    $company = $stmt->fetch(PDO::FETCH_ASSOC);
+
     if (!$company) {
         json_error('Business was not found.', 404);
     }
+
     if ((int) $user['role_type'] !== 2 && (int) $company['id'] !== (int) $user['company_id']) {
         json_error('You cannot access another business.', 403);
     }
+
     return $company;
 }
 
 function validate_business_contact(array $data): void
 {
     $errors = [];
+
     if (!empty($data['email']) && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
         $errors['email'] = 'Enter a valid email address.';
     }
+
     if (!empty($data['mobile']) && !preg_match('/^[6-9][0-9]{9}$/', (string) $data['mobile'])) {
         $errors['mobile'] = 'Enter a valid 10-digit mobile number.';
     }
+
     if ($errors !== []) {
         json_error('Business validation failed.', 422, $errors);
     }
@@ -38,16 +47,24 @@ function validate_business_contact(array $data): void
 function validate_business_admin_contact(array $data): void
 {
     $errors = [];
-    if (!empty($data['admin_email']) &&
-        !filter_var($data['admin_email'], FILTER_VALIDATE_EMAIL)) {
+
+    if (!empty($data['admin_email']) && !filter_var($data['admin_email'], FILTER_VALIDATE_EMAIL)) {
         $errors['admin_email'] = 'Enter a valid email address.';
     }
-    if (!empty($data['admin_mobile']) &&
-        !preg_match('/^[6-9][0-9]{9}$/', (string) $data['admin_mobile'])) {
+
+    if (!empty($data['admin_mobile']) && !preg_match('/^[6-9][0-9]{9}$/', (string) $data['admin_mobile'])) {
         $errors['admin_mobile'] = 'Enter a valid 10-digit mobile number.';
     }
+
     if ($errors !== []) {
         json_error('Branch Admin validation failed.', 422, $errors);
+    }
+}
+
+function business_bind(PDOStatement $stmt, array $params): void
+{
+    foreach ($params as $key => $value) {
+        $stmt->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
     }
 }
 
@@ -65,20 +82,147 @@ if ($method === 'GET') {
         ]);
     }
 
+    if (isset($_GET['datatable'])) {
+        $draw = max(0, (int) ($_GET['draw'] ?? 0));
+        $start = max(0, (int) ($_GET['start'] ?? 0));
+        $length = max(1, min(100000, (int) ($_GET['length'] ?? 10)));
+        $search = trim((string) ($_GET['search']['value'] ?? ''));
+
+        $where = [];
+        $params = [];
+
+        if ((int) $user['role_type'] !== 2) {
+            $where[] = 'c.id = :company_id';
+            $params[':company_id'] = (int) $user['company_id'];
+        }
+
+        $baseWhere = $where;
+        $baseParams = $params;
+
+        if ($search !== '') {
+            $like = '%' . $search . '%';
+            $where[] = '(c.company_name LIKE :search_name
+                         OR c.company_code LIKE :search_code
+                         OR c.email LIKE :search_email
+                         OR c.mobile LIKE :search_mobile)';
+            $params[':search_name'] = $like;
+            $params[':search_code'] = $like;
+            $params[':search_email'] = $like;
+            $params[':search_mobile'] = $like;
+        }
+
+        $statusRaw = trim((string) ($_GET['status'] ?? ''));
+        if ($statusRaw !== '') {
+            $status = (int) $statusRaw;
+            if (!in_array($status, [0, 1], true)) {
+                json_error('Invalid Business status.', 422);
+            }
+            $where[] = 'c.status = :status';
+            $params[':status'] = $status;
+        }
+
+        $baseFrom = ' FROM companies c ';
+
+        $totalSql = 'SELECT COUNT(*)' . $baseFrom .
+            ($baseWhere ? ' WHERE ' . implode(' AND ', $baseWhere) : '');
+        $totalStmt = db()->prepare($totalSql);
+        business_bind($totalStmt, $baseParams);
+        $totalStmt->execute();
+        $recordsTotal = (int) $totalStmt->fetchColumn();
+
+        $filteredSql = 'SELECT COUNT(*)' . $baseFrom .
+            ($where ? ' WHERE ' . implode(' AND ', $where) : '');
+        $filteredStmt = db()->prepare($filteredSql);
+        business_bind($filteredStmt, $params);
+        $filteredStmt->execute();
+        $recordsFiltered = (int) $filteredStmt->fetchColumn();
+
+        $summarySql =
+            'SELECT COUNT(*) AS total_businesses,
+                    COALESCE(SUM(CASE WHEN c.status = 1 THEN 1 ELSE 0 END),0) AS active_businesses,
+                    COALESCE(SUM(CASE WHEN c.status = 0 THEN 1 ELSE 0 END),0) AS inactive_businesses,
+                    COALESCE(SUM((SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id)),0) AS total_branches' .
+            $baseFrom .
+            ($where ? ' WHERE ' . implode(' AND ', $where) : '');
+
+        $summaryStmt = db()->prepare($summarySql);
+        business_bind($summaryStmt, $params);
+        $summaryStmt->execute();
+        $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        $orderColumns = [
+            0 => 'c.company_name',
+            1 => 'c.company_code',
+            2 => 'c.email',
+            3 => 'branch_count',
+            4 => 'c.status',
+            5 => 'c.id',
+        ];
+
+        $orderIndex = (int) ($_GET['order'][0]['column'] ?? 0);
+        $orderDir = strtolower((string) ($_GET['order'][0]['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
+        $orderColumn = $orderColumns[$orderIndex] ?? 'c.company_name';
+
+        $sql =
+            'SELECT c.id,c.company_name,c.company_code,c.email,c.mobile,c.status,
+                    (SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id) AS branch_count' .
+            $baseFrom .
+            ($where ? ' WHERE ' . implode(' AND ', $where) : '') .
+            ' ORDER BY ' . $orderColumn . ' ' . $orderDir . ', c.id DESC
+              LIMIT :start,:length';
+
+        $stmt = db()->prepare($sql);
+        business_bind($stmt, $params);
+        $stmt->bindValue(':start', $start, PDO::PARAM_INT);
+        $stmt->bindValue(':length', $length, PDO::PARAM_INT);
+        $stmt->execute();
+
+        $rows = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $row['id'] = (int) $row['id'];
+            $row['status'] = (int) $row['status'];
+            $row['branch_count'] = (int) $row['branch_count'];
+            $rows[] = $row;
+        }
+
+        json_success('Businesses loaded.', [
+            'datatable' => [
+                'draw' => $draw,
+                'recordsTotal' => $recordsTotal,
+                'recordsFiltered' => $recordsFiltered,
+                'data' => $rows,
+            ],
+            'summary' => [
+                'total_businesses' => (int) ($summary['total_businesses'] ?? 0),
+                'active_businesses' => (int) ($summary['active_businesses'] ?? 0),
+                'inactive_businesses' => (int) ($summary['inactive_businesses'] ?? 0),
+                'total_branches' => (int) ($summary['total_branches'] ?? 0),
+            ],
+            'allowed_actions' => $access['actions'],
+            'current_user' => [
+                'role_type' => (int) $user['role_type'],
+                'company_id' => $user['company_id'] === null ? null : (int) $user['company_id'],
+            ],
+        ]);
+    }
+
     if ((int) $user['role_type'] === 2) {
         $stmt = db()->query(
             'SELECT c.*,
                     (SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id) AS branch_count
-             FROM companies c ORDER BY c.id DESC'
+             FROM companies c
+             ORDER BY c.id DESC'
         );
     } else {
         $stmt = db()->prepare(
             'SELECT c.*,
                     (SELECT COUNT(*) FROM branches b WHERE b.company_id = c.id) AS branch_count
-             FROM companies c WHERE c.id = :company_id'
+             FROM companies c
+             WHERE c.id = :company_id'
         );
         $stmt->execute([':company_id' => (int) $user['company_id']]);
     }
+
     json_success('Businesses loaded.', [
         'businesses' => $stmt->fetchAll(),
         'allowed_actions' => $access['actions'],
@@ -93,35 +237,49 @@ if ($method === 'POST') {
     $access = require_permission('business-list.php', ACTION_CREATE);
     $platformUser = require_platform_user();
     $data = request_data();
+
     require_fields($data, [
-        'company_name', 'company_code', 'branch_name', 'branch_code',
-        'plan_role_id', 'admin_name', 'username', 'password'
+        'company_name',
+        'company_code',
+        'branch_name',
+        'branch_code',
+        'plan_role_id',
+        'admin_name',
+        'username',
+        'password'
     ]);
+
     validate_business_contact([
-        'email' => isset($data['company_email']) ? $data['company_email'] : '',
-        'mobile' => isset($data['company_mobile']) ? $data['company_mobile'] : '',
+        'email' => $data['company_email'] ?? '',
+        'mobile' => $data['company_mobile'] ?? '',
     ]);
     validate_business_admin_contact($data);
     require_strong_password($data['password']);
 
     $planRoleId = positive_id($data['plan_role_id'], 'plan_role_id');
+
     $planStmt = db()->prepare(
-        'SELECT id FROM roles
-         WHERE id = :id AND role_type = 1 AND company_id IS NULL AND status = 1 LIMIT 1'
+        'SELECT id
+         FROM roles
+         WHERE id = :id AND role_type = 1 AND company_id IS NULL AND status = 1
+         LIMIT 1'
     );
     $planStmt->execute([':id' => $planRoleId]);
+
     if (!$planStmt->fetch()) {
         json_error('Selected plan is invalid or inactive.', 422);
     }
 
     $status = isset($data['status']) ? normalize_status($data['status']) : 1;
     $pdo = db();
+
     try {
         $pdo->beginTransaction();
+
         $stmt = $pdo->prepare(
             'INSERT INTO companies
-             (company_name, company_code, email, mobile, status, created_by, created_at, updated_at)
-             VALUES (:name, :code, :email, :mobile, :status, :created_by, NOW(), NOW())'
+             (company_name,company_code,email,mobile,status,created_by,created_at,updated_at)
+             VALUES (:name,:code,:email,:mobile,:status,:created_by,NOW(),NOW())'
         );
         $stmt->execute([
             ':name' => trim((string) $data['company_name']),
@@ -135,8 +293,8 @@ if ($method === 'POST') {
 
         $stmt = $pdo->prepare(
             'INSERT INTO branches
-             (company_id, branch_name, branch_code, role_id, status, created_by, created_at, updated_at)
-             VALUES (:company_id, :name, :code, :role_id, :status, :created_by, NOW(), NOW())'
+             (company_id,branch_name,branch_code,role_id,status,created_by,created_at,updated_at)
+             VALUES (:company_id,:name,:code,:role_id,:status,:created_by,NOW(),NOW())'
         );
         $stmt->execute([
             ':company_id' => $companyId,
@@ -150,10 +308,8 @@ if ($method === 'POST') {
 
         $stmt = $pdo->prepare(
             'INSERT INTO users
-             (company_id, branch_id, role_id, name, username, email, mobile,
-              password_hash, status, created_by, created_at, updated_at)
-             VALUES (:company_id, :branch_id, :role_id, :name, :username,
-                     :email, :mobile, :password_hash, :status, :created_by, NOW(), NOW())'
+             (company_id,branch_id,role_id,name,username,email,mobile,password_hash,status,created_by,created_at,updated_at)
+             VALUES (:company_id,:branch_id,:role_id,:name,:username,:email,:mobile,:password_hash,:status,:created_by,NOW(),NOW())'
         );
         $stmt->execute([
             ':company_id' => $companyId,
@@ -168,6 +324,7 @@ if ($method === 'POST') {
             ':created_by' => (int) $platformUser['id'],
         ]);
         $adminUserId = (int) $pdo->lastInsertId();
+
         $pdo->commit();
 
         audit_log((int) $platformUser['id'], ACTION_CREATE, [
@@ -176,6 +333,7 @@ if ($method === 'POST') {
             'menu_id' => (int) $access['menu']['id'],
             'record_id' => $companyId,
         ]);
+
         json_success('Business, main branch and Branch Admin created successfully.', [
             'company_id' => $companyId,
             'branch_id' => $branchId,
@@ -185,9 +343,11 @@ if ($method === 'POST') {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
         }
+
         if ($exception instanceof PDOException && $exception->getCode() === '23000') {
             json_error('Company code, branch code or username already exists.', 409);
         }
+
         throw $exception;
     }
 }
@@ -196,19 +356,22 @@ if ($method === 'PUT') {
     $access = require_permission('business-list.php', ACTION_UPDATE);
     $user = $access['user'];
     $data = request_data();
+
     require_fields($data, ['id', 'company_name', 'company_code']);
     validate_business_contact($data);
+
     $companyId = positive_id($data['id']);
     $company = business_record_for_user($user, $companyId);
     $status = (int) $company['status'];
+
     if ((int) $user['role_type'] === 2 && isset($data['status'])) {
         $status = normalize_status($data['status']);
     }
 
     $stmt = db()->prepare(
-        'UPDATE companies SET company_name = :name, company_code = :code,
-         email = :email, mobile = :mobile, status = :status, updated_at = NOW()
-         WHERE id = :id'
+        'UPDATE companies
+         SET company_name=:name,company_code=:code,email=:email,mobile=:mobile,status=:status,updated_at=NOW()
+         WHERE id=:id'
     );
     $stmt->execute([
         ':name' => trim((string) $data['company_name']),
@@ -218,12 +381,14 @@ if ($method === 'PUT') {
         ':status' => $status,
         ':id' => $companyId,
     ]);
+
     audit_log((int) $user['id'], ACTION_UPDATE, [
         'company_id' => $companyId,
         'branch_id' => $user['branch_id'],
         'menu_id' => (int) $access['menu']['id'],
         'record_id' => $companyId,
     ]);
+
     json_success('Business updated successfully.');
 }
 
@@ -231,11 +396,19 @@ if ($method === 'PATCH') {
     $access = require_permission('business-list.php', ACTION_UPDATE);
     $user = require_platform_user();
     $data = request_data();
+
     require_fields($data, ['id', 'status']);
+
     $companyId = positive_id($data['id']);
     business_record_for_user($user, $companyId);
-    db()->prepare('UPDATE companies SET status = :status, updated_at = NOW() WHERE id = :id')
-        ->execute([':status' => normalize_status($data['status']), ':id' => $companyId]);
+
+    db()->prepare(
+        'UPDATE companies SET status=:status,updated_at=NOW() WHERE id=:id'
+    )->execute([
+        ':status' => normalize_status($data['status']),
+        ':id' => $companyId,
+    ]);
+
     json_success('Business status updated successfully.');
 }
 

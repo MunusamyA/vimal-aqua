@@ -60,6 +60,13 @@ $headScripts = [
     </button>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card"><div class="kpi-icon blue"><i data-lucide="badge-indian-rupee"></i></div><div><div class="kpi-label">Total Price Levels</div><div class="kpi-value" id="kpiTotal">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div><div><div class="kpi-label">Active Price Levels</div><div class="kpi-value" id="kpiActive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon orange"><i data-lucide="circle-off"></i></div><div><div class="kpi-label">Inactive Price Levels</div><div class="kpi-value" id="kpiInactive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon teal"><i data-lucide="list-filter"></i></div><div><div class="kpi-label">Matching Results</div><div class="kpi-value" id="kpiMatching">0</div></div></div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
@@ -92,6 +99,7 @@ $headScripts = [
 
     var allowedActions = [];
     var searchTimer = null;
+    var statsRows = [];
     var masterSearch = document.getElementById("masterSearch");
     var statusFilter = document.getElementById("statusFilter");
     var addButton = document.getElementById("addButton");
@@ -100,6 +108,36 @@ $headScripts = [
     var ACTION_UPDATE = 3;
     var ACTION_ACTIVATE = 27;
     var ACTION_DEACTIVATE = 28;
+
+
+    function updateStats() {
+        var q = (masterSearch.value || "").trim().toLowerCase();
+        var status = statusFilter.value;
+
+        var matching = statsRows.filter(function(row) {
+            if (q && String(row.price_level_name || "").toLowerCase().indexOf(q) === -1) return false;
+            if (status !== "" && String(row.status) !== String(status)) return false;
+            return true;
+        });
+
+        var active = statsRows.filter(function(row){ return Number(row.status) === 1; }).length;
+        var inactive = statsRows.filter(function(row){ return Number(row.status) !== 1; }).length;
+
+        document.getElementById("kpiTotal").textContent = statsRows.length.toLocaleString("en-IN");
+        document.getElementById("kpiActive").textContent = active.toLocaleString("en-IN");
+        document.getElementById("kpiInactive").textContent = inactive.toLocaleString("en-IN");
+        document.getElementById("kpiMatching").textContent = matching.length.toLocaleString("en-IN");
+    }
+
+    async function refreshStats() {
+        try {
+            var result = await App.api("api/price-level.php");
+            statsRows = result.data.price_levels || [];
+        } catch (error) {
+            statsRows = [];
+        }
+        updateStats();
+    }
 
     function escapeHtml(value) {
         return String(value === null || value === undefined ? "" : value)
@@ -119,7 +157,7 @@ $headScripts = [
         serverSide: true,
         searching: true,
         searchDelay: 350,
-        appSearchPlaceholder: "Search Price Levels...",
+        appSearch: false,
         appLoaderText: "Loading price levels...",
         pageLength: 10,
         lengthMenu: [[10,25,50,100],[10,25,50,100]],
@@ -189,15 +227,15 @@ $headScripts = [
 
     masterSearch.addEventListener("input",function(){
         window.clearTimeout(searchTimer);
-        searchTimer=window.setTimeout(function(){table.search(masterSearch.value.trim()).draw();},350);
+        searchTimer=window.setTimeout(function(){table.search(masterSearch.value.trim()).draw();updateStats();},350);
     });
-    statusFilter.addEventListener("change",function(){table.ajax.reload(null,true);});
+    statusFilter.addEventListener("change",function(){table.ajax.reload(null,true);updateStats();});
 
     addButton.addEventListener("click",function(){
         if (!has(allowedActions, ACTION_CREATE) || !window.AppPriceLevelForm) return;
         AppPriceLevelForm.openCreate({
             apiUrl:"api/price-level.php",
-            onSaved:function(){table.ajax.reload(null,false);}
+            onSaved:function(){table.ajax.reload(null,false);refreshStats();}
         });
     });
 
@@ -206,7 +244,7 @@ $headScripts = [
         if(editButton && has(allowedActions,ACTION_UPDATE) && window.AppPriceLevelForm) {
             AppPriceLevelForm.openEdit(Number(editButton.getAttribute("data-id")||0),{
                 apiUrl:"api/price-level.php",
-                onSaved:function(){table.ajax.reload(null,false);}
+                onSaved:function(){table.ajax.reload(null,false);refreshStats();}
             });
             return;
         }
@@ -223,9 +261,11 @@ $headScripts = [
         }).then(function(result){
             if(window.showToast)showToast(result.message||"Status updated successfully.",{type:"success",duration:2});
             table.ajax.reload(null,false);
+            refreshStats();
         }).catch(function(error){App.showError(error,"Unable to update Price Level status.");})
           .finally(function(){statusButton.disabled=false;});
     });
+    refreshStats();
 })(window.jQuery,window,document);
 </script>
 </section>

@@ -139,7 +139,7 @@ $pageTitle = 'Purchase Form';
                 </div>
 
                 <div class="field col-1">
-                    <label for="entryRate">Primary Rate</label>
+                    <label for="entryRate" id="entryRateLabel">Primary Rate</label>
                     <input class="input" id="entryRate" type="text" inputmode="decimal"
                            data-validation="decimal" data-decimal-places="2"
                            placeholder="0.00">
@@ -573,6 +573,7 @@ $pageTitle = 'Purchase Form';
             document.getElementById("entrySecondaryQtyLabel").textContent = "Secondary Qty";
             document.getElementById("entryFreePrimaryQtyLabel").textContent = "Free P";
             document.getElementById("entryFreeSecondaryQtyLabel").textContent = "Free S";
+            document.getElementById("entryRateLabel").textContent = "Primary Rate";
             secondaryQty.disabled = true;
             freeSecondaryQty.disabled = true;
             return;
@@ -585,6 +586,7 @@ $pageTitle = 'Purchase Form';
         document.getElementById("entryFreePrimaryQtyLabel").textContent = "Free " + primaryName;
         document.getElementById("entrySecondaryQtyLabel").textContent = secondaryName + " Qty";
         document.getElementById("entryFreeSecondaryQtyLabel").textContent = secondary ? "Free " + secondaryName : "Free Secondary";
+        document.getElementById("entryRateLabel").textContent = primaryName + " Rate";
 
         secondaryQty.disabled = !secondary;
         freeSecondaryQty.disabled = !secondary;
@@ -603,13 +605,28 @@ $pageTitle = 'Purchase Form';
 
         var gstTypeText = Number(product.gst_type || 2) === 1 ? "Inclusive" : "Exclusive";
         var taxRate = num(product.tax_percentage);
-        var conversionText = secondary
-            ? " · 1 " + secondaryName + " = " + qtyText(secondary.conversion_qty) + " " + primaryName
-            : "";
+        var primaryConversion = Math.max(1, num(primary.conversion_qty || 1));
+        var secondaryConversion = secondary ? Math.max(1, num(secondary.conversion_qty || 1)) : 0;
+        var conversionText = "";
+
+        if (secondary) {
+            /*
+             * Both unit conversions point to the same stock base.
+             * New standard example: Box=12, Piece=1 -> 1 Box = 12 Pieces.
+             * Legacy example: Piece=1, Box=12 -> 1 Box = 12 Pieces.
+             */
+            if (primaryConversion >= secondaryConversion) {
+                conversionText = " · 1 " + primaryName + " = " +
+                    qtyText(primaryConversion / secondaryConversion) + " " + secondaryName;
+            } else {
+                conversionText = " · 1 " + secondaryName + " = " +
+                    qtyText(secondaryConversion / primaryConversion) + " " + primaryName;
+            }
+        }
 
         document.getElementById("entryProductInfo").textContent =
             "Primary: " + primaryName +
-            (secondary ? " · Secondary: " + secondaryName : "") +
+            (secondary ? " · Secondary/Base: " + secondaryName : "") +
             conversionText +
             " · HSN: " + (product.hsn_code || "Not Set") +
             " · GST Type: " + gstTypeText +
@@ -654,8 +671,17 @@ $pageTitle = 'Purchase Form';
             var freePrimaryQty = Math.max(0, num(item.free_primary_qty));
             var freeSecondaryQty = secondary ? Math.max(0, num(item.free_secondary_qty)) : 0;
             var primaryRate = Math.max(0, num(item.primary_rate));
+            var primaryConversion = Math.max(1, num(primary.conversion_qty || 1));
             var secondaryConversion = secondary ? Math.max(1, num(secondary.conversion_qty || 1)) : 0;
-            var secondaryRate = secondary ? round(primaryRate * secondaryConversion, 2) : 0;
+
+            /*
+             * Rate conversion uses the same base-unit ratio as stock:
+             * Secondary Rate = Primary Rate x Secondary Conv / Primary Conv.
+             * Example: Box=12, Piece=1, Box Rate=120 -> Piece Rate=10.
+             */
+            var secondaryRate = secondary
+                ? round(primaryRate * secondaryConversion / primaryConversion, 2)
+                : 0;
             var gross = round(primaryQty * primaryRate + secondaryQty * secondaryRate, 2);
             var discountType = Number(item.discount_type || 1);
             var discountValue = Math.max(0, num(item.discount_value));
@@ -792,7 +818,13 @@ $pageTitle = 'Purchase Form';
         calc.rows.forEach(function(row,index){
             var item = row.source;
             var product = row.product || {};
+            var primary = row.primary || {};
             var secondary = row.secondary || null;
+            var primaryConversion = Math.max(1, num(primary.conversion_qty || 1));
+            var secondaryConversion = secondary ? Math.max(1, num(secondary.conversion_qty || 1)) : 0;
+            var stockUnit = secondary && secondaryConversion <= primaryConversion
+                ? unitText(secondary)
+                : unitText(primary);
             var taxRate = num(product.tax_percentage || item.tax_percentage);
             var gstType = Number(product.gst_type || item.gst_type || 2);
             var taxText =
@@ -848,7 +880,7 @@ $pageTitle = 'Purchase Form';
                 '</td>' +
 
                 '<td>' +
-                    '<strong>'+escapeHtml(qtyText(row.stock_base_qty))+'</strong>' +
+                    '<strong>'+escapeHtml(qtyText(row.stock_base_qty) + " " + stockUnit)+'</strong>' +
                 '</td>' +
 
                 '<td class="cell-discount">' +

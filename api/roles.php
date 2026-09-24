@@ -160,6 +160,181 @@ if ($method === 'GET' && isset($_GET['ref'])) {
     ]);
 }
 
+if ($method === 'GET' && isset($_GET['datatable'])) {
+    $access = require_permission('role-list.php', ACTION_VIEW);
+    $user = $access['user'];
+
+    $draw = max(0, (int)($_GET['draw'] ?? 0));
+    $start = max(0, (int)($_GET['start'] ?? 0));
+
+    $requestedLength = (int)($_GET['length'] ?? 10);
+    $length = $requestedLength < 0
+        ? 100000
+        : max(1, min(100000, $requestedLength));
+
+    $search = trim((string)($_GET['search']['value'] ?? ''));
+    $categoryFilter = trim((string)($_GET['role_type'] ?? ''));
+    $statusFilter = trim((string)($_GET['status'] ?? ''));
+
+    $baseFrom =
+        ' FROM roles r
+          LEFT JOIN users u ON u.id = r.created_by
+          LEFT JOIN companies c ON c.id = r.company_id ';
+
+    $baseWhere = [];
+    $baseParams = [];
+
+    if ((int)$user['role_type'] === 2) {
+        $baseWhere[] = 'r.role_type IN (1,2)';
+        $baseWhere[] = 'r.company_id IS NULL';
+    } else {
+        $baseWhere[] = '(r.company_id = :access_company_id OR r.id = :access_plan_role_id)';
+        $baseParams[':access_company_id'] = (int)$user['company_id'];
+        $baseParams[':access_plan_role_id'] = (int)$user['branch_plan_role_id'];
+    }
+
+    $where = $baseWhere;
+    $params = $baseParams;
+
+    if ($search !== '') {
+        $term = '%' . $search . '%';
+        $where[] =
+            '(r.role_name LIKE :search_role
+              OR COALESCE(c.company_name, \'Platform\') LIKE :search_owner
+              OR COALESCE(u.name, \'\') LIKE :search_creator)';
+        $params[':search_role'] = $term;
+        $params[':search_owner'] = $term;
+        $params[':search_creator'] = $term;
+    }
+
+    if ($categoryFilter !== '') {
+        $roleType = (int)$categoryFilter;
+        if (!in_array($roleType, [1,2,3], true)) {
+            json_error('Invalid Role category.', 422);
+        }
+
+        $where[] = 'r.role_type = :filter_role_type';
+        $params[':filter_role_type'] = $roleType;
+    }
+
+    if ($statusFilter !== '') {
+        $status = (int)$statusFilter;
+        if (!in_array($status, [0,1], true)) {
+            json_error('Invalid Role status.', 422);
+        }
+
+        $where[] = 'r.status = :filter_status';
+        $params[':filter_status'] = $status;
+    }
+
+    $bind = static function (PDOStatement $stmt, array $values): void {
+        foreach ($values as $key => $value) {
+            $stmt->bindValue(
+                $key,
+                $value,
+                is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
+            );
+        }
+    };
+
+    $totalSql =
+        'SELECT COUNT(*)' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $baseWhere);
+
+    $totalStmt = db()->prepare($totalSql);
+    $bind($totalStmt, $baseParams);
+    $totalStmt->execute();
+    $recordsTotal = (int)$totalStmt->fetchColumn();
+
+    $filteredSql =
+        'SELECT COUNT(*)' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $where);
+
+    $filteredStmt = db()->prepare($filteredSql);
+    $bind($filteredStmt, $params);
+    $filteredStmt->execute();
+    $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+    $summarySql =
+        'SELECT COUNT(*) AS total_roles,
+                COALESCE(SUM(CASE WHEN r.status = 1 THEN 1 ELSE 0 END),0) AS active_roles,
+                COALESCE(SUM(CASE WHEN r.status = 0 THEN 1 ELSE 0 END),0) AS inactive_roles,
+                COALESCE(SUM(CASE WHEN r.role_type = 1 THEN 1 ELSE 0 END),0) AS plan_roles' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $where);
+
+    $summaryStmt = db()->prepare($summarySql);
+    $bind($summaryStmt, $params);
+    $summaryStmt->execute();
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+    $orderColumns = [
+        0 => 'r.role_name',
+        1 => 'r.role_type',
+        2 => 'c.company_name',
+        3 => 'r.status',
+        4 => 'r.id',
+    ];
+
+    $orderIndex = (int)($_GET['order'][0]['column'] ?? 0);
+    $orderDir = strtolower((string)($_GET['order'][0]['dir'] ?? 'asc')) === 'desc'
+        ? 'DESC'
+        : 'ASC';
+
+    $orderColumn = $orderColumns[$orderIndex] ?? 'r.role_name';
+
+    $sql =
+        'SELECT r.*,u.name AS created_by_name,c.company_name' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $where) .
+        ' ORDER BY ' . $orderColumn . ' ' . $orderDir . ',r.id ASC
+          LIMIT :start,:length';
+
+    $stmt = db()->prepare($sql);
+    $bind($stmt, $params);
+    $stmt->bindValue(':start', $start, PDO::PARAM_INT);
+    $stmt->bindValue(':length', $length, PDO::PARAM_INT);
+    $stmt->execute();
+
+    $rows = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $role) {
+        $row = public_role($role, (int)$user['role_id']);
+        $row['id'] = (int)$row['id'];
+        $row['role_type'] = (int)$row['role_type'];
+        $row['status'] = (int)$row['status'];
+        $row['company_id'] = $row['company_id'] === null
+            ? null
+            : (int)$row['company_id'];
+
+        $rows[] = $row;
+    }
+
+    json_success('Roles loaded.', [
+        'datatable' => [
+            'draw' => $draw,
+            'recordsTotal' => $recordsTotal,
+            'recordsFiltered' => $recordsFiltered,
+            'data' => $rows,
+        ],
+        'summary' => [
+            'total_roles' => (int)($summary['total_roles'] ?? 0),
+            'active_roles' => (int)($summary['active_roles'] ?? 0),
+            'inactive_roles' => (int)($summary['inactive_roles'] ?? 0),
+            'plan_roles' => (int)($summary['plan_roles'] ?? 0),
+        ],
+        'allowed_actions' => $access['actions'],
+        'current_user' => [
+            'id' => (int)$user['id'],
+            'role_type' => (int)$user['role_type'],
+            'company_id' => $user['company_id'] === null
+                ? null
+                : (int)$user['company_id'],
+        ],
+    ]);
+}
+
 if ($method === 'GET') {
     $access = require_permission('role-list.php', ACTION_VIEW);
     $user = $access['user'];

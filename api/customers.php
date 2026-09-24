@@ -139,10 +139,79 @@ function customer_options(int $branchId): array
 
     foreach ($lines as &$row) $row['id'] = (int)$row['id'];
     unset($row);
+
     foreach ($priceLevels as &$row) $row['id'] = (int)$row['id'];
     unset($row);
 
-    return ['lines' => $lines, 'price_levels' => $priceLevels];
+    /*
+     * Customer opening stock is only for Reusable / Returnable products.
+     * Unit convention:
+     *   unit_type 1 = Primary / larger unit
+     *   unit_type 2 = Secondary / smaller base unit
+     */
+    $productStmt = db()->prepare(
+        'SELECT p.id,
+                p.product_code,
+                p.product_name,
+                pu.id AS product_unit_id,
+                pu.unit_type,
+                pu.conversion_qty,
+                u.unit_name,
+                u.short_name
+         FROM products p
+         INNER JOIN product_units pu
+            ON pu.product_id=p.id
+           AND pu.status=1
+         INNER JOIN units u
+            ON u.id=pu.unit_id
+         WHERE p.branch_id=:branch_id
+           AND p.status=1
+           AND p.container_type=1
+         ORDER BY p.product_name,pu.unit_type,pu.id'
+    );
+    $productStmt->execute([':branch_id' => $branchId]);
+
+    $products = [];
+
+    foreach ($productStmt->fetchAll() as $row) {
+        $id = (int)$row['id'];
+
+        if (!isset($products[$id])) {
+            $products[$id] = [
+                'id' => $id,
+                'product_code' => (string)$row['product_code'],
+                'product_name' => (string)$row['product_name'],
+                'primary_unit' => null,
+                'secondary_unit' => null,
+            ];
+        }
+
+        $unit = [
+            'product_unit_id' => (int)$row['product_unit_id'],
+            'unit_type' => (int)$row['unit_type'],
+            'conversion_qty' => max(1, round((float)$row['conversion_qty'], 4)),
+            'unit_name' => (string)$row['unit_name'],
+            'short_name' => (string)$row['short_name'],
+        ];
+
+        if ((int)$row['unit_type'] === 1 && $products[$id]['primary_unit'] === null) {
+            $products[$id]['primary_unit'] = $unit;
+        } elseif ((int)$row['unit_type'] === 2 && $products[$id]['secondary_unit'] === null) {
+            $products[$id]['secondary_unit'] = $unit;
+        }
+    }
+
+    foreach ($products as $id => $product) {
+        if ($product['primary_unit'] === null) {
+            unset($products[$id]);
+        }
+    }
+
+    return [
+        'lines' => $lines,
+        'price_levels' => $priceLevels,
+        'opening_stock_products' => array_values($products),
+    ];
 }
 
 function customer_assert_line(int $branchId, int $lineId): void
@@ -175,6 +244,333 @@ function customer_assert_price_level(int $branchId, int $priceLevelId): void
     if (!$stmt->fetchColumn()) {
         json_error('Selected Price Level is invalid or inactive.', 422, [
             'price_level_id' => 'Select an active Price Level.',
+        ]);
+    }
+}
+
+
+function customer_decimal_qty($value, string $label): float
+{
+    $text = trim((string)($value ?? ''));
+    if ($text === '') $text = '0';
+
+    if (!preg_match('/^(?:[0-9]+(?:\.[0-9]{1,3})?|\.[0-9]{1,3})$/', $text)) {
+        json_error('Customer opening stock validation failed.', 422, [
+            'opening_stocks_json' => 'Enter a valid ' . $label . '.',
+        ]);
+    }
+
+    return round((float)$text, 3);
+}
+
+function customer_opening_product_bundle(int $branchId, int $productId, bool $requireActive = true): array
+{
+    $stmt = db()->prepare(
+        'SELECT p.id,p.product_code,p.product_name,p.container_type,
+                pu.id AS product_unit_id,pu.unit_type,pu.conversion_qty,
+                u.unit_name,u.short_name
+         FROM products p
+         INNER JOIN product_units pu
+            ON pu.product_id=p.id
+           AND pu.status=1
+         INNER JOIN units u
+            ON u.id=pu.unit_id
+         WHERE p.id=:product_id
+           AND p.branch_id=:branch_id
+           AND p.container_type=1' .
+        ($requireActive ? ' AND p.status=1' : '') .
+        ' ORDER BY pu.unit_type,pu.id'
+    );
+
+    $stmt->execute([
+        ':product_id' => $productId,
+        ':branch_id' => $branchId,
+    ]);
+
+    $rows = $stmt->fetchAll();
+
+    if (!$rows) {
+        json_error(
+            'Selected opening stock product is invalid or is not reusable/returnable.',
+            422
+        );
+    }
+
+    $bundle = [
+        'id' => $productId,
+        'product_code' => (string)$rows[0]['product_code'],
+        'product_name' => (string)$rows[0]['product_name'],
+        'primary_unit' => null,
+        'secondary_unit' => null,
+    ];
+
+    foreach ($rows as $row) {
+        $unit = [
+            'product_unit_id' => (int)$row['product_unit_id'],
+            'unit_type' => (int)$row['unit_type'],
+            'conversion_qty' => max(1, round((float)$row['conversion_qty'], 4)),
+            'unit_name' => (string)$row['unit_name'],
+            'short_name' => (string)$row['short_name'],
+        ];
+
+        if ((int)$row['unit_type'] === 1 && $bundle['primary_unit'] === null) {
+            $bundle['primary_unit'] = $unit;
+        } elseif ((int)$row['unit_type'] === 2 && $bundle['secondary_unit'] === null) {
+            $bundle['secondary_unit'] = $unit;
+        }
+    }
+
+    if ($bundle['primary_unit'] === null) {
+        json_error('Selected opening stock product has no active Primary Unit.', 422);
+    }
+
+    return $bundle;
+}
+
+function customer_parse_opening_stocks(array $data, int $branchId): array
+{
+    $raw = $data['opening_stocks_json'] ?? '[]';
+
+    $rows = is_array($raw)
+        ? $raw
+        : json_decode((string)$raw, true);
+
+    if ($rows === null && trim((string)$raw) !== '') {
+        json_error('Opening stock data is invalid.', 422, [
+            'opening_stocks_json' => 'Opening stock data is invalid.',
+        ]);
+    }
+
+    if (!is_array($rows)) $rows = [];
+
+    $items = [];
+    $seen = [];
+    $total = 0.0;
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) continue;
+
+        $productId = (int)($row['product_id'] ?? 0);
+        if ($productId < 1) continue;
+
+        if (isset($seen[$productId])) {
+            json_error(
+                'The same opening stock product cannot be added more than once.',
+                422
+            );
+        }
+        $seen[$productId] = true;
+
+        $product = customer_opening_product_bundle($branchId, $productId);
+
+        $primaryQty = customer_decimal_qty(
+            $row['primary_qty'] ?? 0,
+            'Primary Quantity'
+        );
+
+        $secondaryQty = customer_decimal_qty(
+            $row['secondary_qty'] ?? 0,
+            'Secondary Quantity'
+        );
+
+        if ($product['secondary_unit'] === null && $secondaryQty > 0) {
+            json_error(
+                $product['product_name'] . ' has no Secondary Unit.',
+                422
+            );
+        }
+
+        if ($primaryQty <= 0 && $secondaryQty <= 0) {
+            continue;
+        }
+
+        $primaryConversion = max(
+            1,
+            (float)$product['primary_unit']['conversion_qty']
+        );
+
+        $secondaryConversion = $product['secondary_unit'] !== null
+            ? max(1, (float)$product['secondary_unit']['conversion_qty'])
+            : 0.0;
+
+        $baseQty = round(
+            ($primaryQty * $primaryConversion) +
+            ($secondaryQty * $secondaryConversion),
+            3
+        );
+
+        if ($baseQty <= 0) continue;
+
+        $items[] = [
+            'product_id' => $productId,
+            'product_name' => $product['product_name'],
+            'primary_qty' => $primaryQty,
+            'secondary_qty' => $secondaryQty,
+            'primary_conversion_qty' => $primaryConversion,
+            'secondary_conversion_qty' => $secondaryConversion,
+            'base_qty' => $baseQty,
+            'product' => $product,
+        ];
+
+        $total = round($total + $baseQty, 3);
+    }
+
+    return [
+        'items' => $items,
+        'total_base_qty' => $total,
+    ];
+}
+
+function customer_opening_stock_state(
+    int $branchId,
+    int $customerId,
+    float $legacyOpeningBalance = 0.0
+): array {
+    $movementStmt = db()->prepare(
+        'SELECT COUNT(*)
+         FROM can_movements
+         WHERE branch_id=:branch_id
+           AND customer_id=:customer_id'
+    );
+    $movementStmt->execute([
+        ':branch_id' => $branchId,
+        ':customer_id' => $customerId,
+    ]);
+
+    $hasAnyMovement = (int)$movementStmt->fetchColumn() > 0;
+
+    $stmt = db()->prepare(
+        "SELECT cm.product_id,
+                p.product_code,
+                p.product_name,
+                SUM(cm.qty) AS base_qty
+         FROM can_movements cm
+         INNER JOIN products p
+            ON p.id=cm.product_id
+           AND p.branch_id=cm.branch_id
+         WHERE cm.branch_id=:branch_id
+           AND cm.customer_id=:customer_id
+           AND cm.movement_type=5
+           AND cm.sale_id IS NULL
+           AND cm.line_run_id IS NULL
+           AND cm.remarks='Opening Customer Stock'
+         GROUP BY cm.product_id,p.product_code,p.product_name
+         ORDER BY p.product_name"
+    );
+
+    $stmt->execute([
+        ':branch_id' => $branchId,
+        ':customer_id' => $customerId,
+    ]);
+
+    $items = [];
+
+    foreach ($stmt->fetchAll() as $row) {
+        $productId = (int)$row['product_id'];
+        $baseQty = round((float)$row['base_qty'], 3);
+        $product = customer_opening_product_bundle($branchId, $productId, false);
+
+        $primaryConversion = max(
+            1,
+            (float)$product['primary_unit']['conversion_qty']
+        );
+
+        $secondaryConversion = $product['secondary_unit'] !== null
+            ? max(1, (float)$product['secondary_unit']['conversion_qty'])
+            : 0.0;
+
+        if ($product['secondary_unit'] !== null) {
+            $primaryQty = floor(($baseQty / $primaryConversion) + 0.0000001);
+            $remainingBase = max(
+                0,
+                round($baseQty - ($primaryQty * $primaryConversion), 3)
+            );
+
+            $secondaryQty = $secondaryConversion > 0
+                ? round($remainingBase / $secondaryConversion, 3)
+                : 0.0;
+        } else {
+            $primaryQty = round($baseQty / $primaryConversion, 3);
+            $secondaryQty = 0.0;
+        }
+
+        $items[] = [
+            'product_id' => $productId,
+            'product_code' => (string)$row['product_code'],
+            'product_name' => (string)$row['product_name'],
+            'primary_qty' => $primaryQty,
+            'secondary_qty' => $secondaryQty,
+            'primary_conversion_qty' => $primaryConversion,
+            'secondary_conversion_qty' => $secondaryConversion,
+            'base_qty' => $baseQty,
+            'primary_unit' => $product['primary_unit'],
+            'secondary_unit' => $product['secondary_unit'],
+        ];
+    }
+
+    /*
+     * Opening stock is one-time.
+     * Lock when:
+     * - any can movement already exists, or
+     * - an older customer already has a legacy opening can balance.
+     */
+    $locked = $hasAnyMovement || $legacyOpeningBalance > 0.0005;
+
+    return [
+        'items' => $items,
+        'locked' => $locked,
+        'has_any_can_movement' => $hasAnyMovement,
+        'legacy_opening_can_balance' => round($legacyOpeningBalance, 3),
+    ];
+}
+
+function customer_save_opening_stocks(
+    PDO $pdo,
+    int $branchId,
+    int $customerId,
+    array $items,
+    int $userId
+): void {
+    if (!$items) return;
+
+    $insert = $pdo->prepare(
+        "INSERT INTO can_movements
+         (
+            branch_id,
+            movement_date,
+            customer_id,
+            product_id,
+            sale_id,
+            line_run_id,
+            movement_type,
+            qty,
+            remarks,
+            created_by,
+            created_at
+         )
+         VALUES
+         (
+            :branch_id,
+            NOW(),
+            :customer_id,
+            :product_id,
+            NULL,
+            NULL,
+            5,
+            :qty,
+            'Opening Customer Stock',
+            :created_by,
+            NOW()
+         )"
+    );
+
+    foreach ($items as $item) {
+        $insert->execute([
+            ':branch_id' => $branchId,
+            ':customer_id' => $customerId,
+            ':product_id' => (int)$item['product_id'],
+            ':qty' => round((float)$item['base_qty'], 3),
+            ':created_by' => $userId,
         ]);
     }
 }
@@ -215,12 +611,6 @@ function customer_validate(array $data, int $branchId): array
         $errors['opening_balance'] = 'Enter a valid Opening Balance.';
     }
 
-    $openingCanBalance = trim((string)($data['opening_can_balance'] ?? ''));
-    if ($openingCanBalance === '') $openingCanBalance = '0';
-    if (!preg_match('/^(?:[0-9]+(?:\.[0-9]{1,3})?|\.[0-9]{1,3})$/', $openingCanBalance)) {
-        $errors['opening_can_balance'] = 'Enter a valid Opening Can Balance.';
-    }
-
     $status = (int)($data['status'] ?? 1);
     if (!in_array($status, [0,1], true)) {
         $errors['status'] = 'Status must be Active or Inactive.';
@@ -240,7 +630,6 @@ function customer_validate(array $data, int $branchId): array
         'price_level_id' => $priceLevelId,
         'credit_limit' => round((float)$creditLimit, 2),
         'opening_balance' => round((float)$openingBalance, 2),
-        'opening_can_balance' => round((float)$openingCanBalance, 3),
         'status' => $status,
     ];
 }
@@ -257,6 +646,7 @@ if ($method === 'GET' && isset($_GET['options'])) {
         'next_customer_code' => customer_generate_code($branchId),
         'lines' => $options['lines'],
         'price_levels' => $options['price_levels'],
+        'opening_stock_products' => $options['opening_stock_products'],
         'allowed_actions' => $access['actions'],
     ]);
 }
@@ -265,10 +655,16 @@ if ($method === 'GET' && isset($_GET['ref'])) {
     $access = require_permission('customer-list.php', ACTION_VIEW);
     $context = customer_context($access['user']);
 
+    $branchId = (int)$context['branch_id'];
+    $customerId = customer_id_from_ref($_GET['ref']);
+    $customer = customer_record($branchId, $customerId);
+
     json_success('Customer loaded.', [
-        'customer' => customer_record(
-            (int)$context['branch_id'],
-            customer_id_from_ref($_GET['ref'])
+        'customer' => $customer,
+        'opening_stock' => customer_opening_stock_state(
+            $branchId,
+            $customerId,
+            (float)$customer['opening_can_balance']
         ),
         'allowed_actions' => $access['actions'],
     ]);
@@ -281,9 +677,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $draw = max(1, (int)($_GET['draw'] ?? 1));
     $start = max(0, (int)($_GET['start'] ?? 0));
-    $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
+    $requestedLength = (int)($_GET['length'] ?? 10);
+    $length = $requestedLength < 0 ? 100000 : max(1, min(100000, $requestedLength));
     $search = trim((string)($_GET['search']['value'] ?? ''));
     $statusFilter = (string)($_GET['status'] ?? '');
+    $lineFilter = trim((string)($_GET['line_id'] ?? ''));
+    $priceLevelFilter = trim((string)($_GET['price_level_id'] ?? ''));
 
     $baseFrom =
         ' FROM customers c
@@ -310,6 +709,24 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':search_line_code'] = $term;
         $params[':search_line_name'] = $term;
         $params[':search_price_level'] = $term;
+    }
+
+    if ($lineFilter !== '') {
+        $lineId = (int)$lineFilter;
+        if ($lineId < 1) {
+            json_error('Invalid Line filter.', 422);
+        }
+        $where[] = 'c.line_id=:line_id';
+        $params[':line_id'] = $lineId;
+    }
+
+    if ($priceLevelFilter !== '') {
+        $priceLevelId = (int)$priceLevelFilter;
+        if ($priceLevelId < 1) {
+            json_error('Invalid Price Level filter.', 422);
+        }
+        $where[] = 'c.price_level_id=:price_level_id';
+        $params[':price_level_id'] = $priceLevelId;
     }
 
     if ($statusFilter !== '') {
@@ -363,7 +780,8 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $stmt = db()->prepare($sql);
 
     foreach ($params as $key => $value) {
-        $type = ($key === ':branch_id' || $key === ':status') ? PDO::PARAM_INT : PDO::PARAM_STR;
+        $integerKeys = [':branch_id', ':status', ':line_id', ':price_level_id'];
+        $type = in_array($key, $integerKeys, true) ? PDO::PARAM_INT : PDO::PARAM_STR;
         $stmt->bindValue($key, $value, $type);
     }
     $stmt->bindValue(':start', $start, PDO::PARAM_INT);
@@ -437,11 +855,16 @@ if ($method === 'POST') {
     $context = customer_context($user);
     $branchId = (int)$context['branch_id'];
     $data = request_data();
+
     $clean = customer_validate($data, $branchId);
+    $opening = customer_parse_opening_stocks($data, $branchId);
     $code = customer_generate_code($branchId);
 
+    $pdo = db();
+    $pdo->beginTransaction();
+
     try {
-        $stmt = db()->prepare(
+        $stmt = $pdo->prepare(
             'INSERT INTO customers
              (branch_id,customer_code,customer_name,mobile,address,line_id,line_sequence,
               price_level_id,credit_limit,opening_balance,opening_can_balance,status,
@@ -451,6 +874,7 @@ if ($method === 'POST') {
               :price_level_id,:credit_limit,:opening_balance,:opening_can_balance,:status,
               :created_by,NOW(),NOW())'
         );
+
         $stmt->execute([
             ':branch_id' => $branchId,
             ':customer_code' => $code,
@@ -462,12 +886,20 @@ if ($method === 'POST') {
             ':price_level_id' => $clean['price_level_id'],
             ':credit_limit' => $clean['credit_limit'],
             ':opening_balance' => $clean['opening_balance'],
-            ':opening_can_balance' => $clean['opening_can_balance'],
+            ':opening_can_balance' => $opening['total_base_qty'],
             ':status' => $clean['status'],
             ':created_by' => (int)$user['id'],
         ]);
 
-        $id = (int)db()->lastInsertId();
+        $id = (int)$pdo->lastInsertId();
+
+        customer_save_opening_stocks(
+            $pdo,
+            $branchId,
+            $id,
+            $opening['items'],
+            (int)$user['id']
+        );
 
         audit_log((int)$user['id'], ACTION_CREATE, [
             'company_id' => (int)$context['company_id'],
@@ -476,13 +908,24 @@ if ($method === 'POST') {
             'record_id' => $id,
         ]);
 
+        $pdo->commit();
+
         json_success('Customer created successfully.', [
             'customer' => customer_record($branchId, $id),
+            'opening_stock' => customer_opening_stock_state(
+                $branchId,
+                $id,
+                (float)$opening['total_base_qty']
+            ),
         ], 201);
-    } catch (PDOException $e) {
-        if ($e->getCode() === '23000') {
+
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+
+        if ($e instanceof PDOException && $e->getCode() === '23000') {
             json_error('Customer code already exists in this branch.', 409);
         }
+
         throw $e;
     }
 }
@@ -500,47 +943,96 @@ if ($method === 'PUT') {
     $old = customer_record($branchId, $id);
     $clean = customer_validate($data, $branchId);
 
-    $stmt = db()->prepare(
-        'UPDATE customers
-         SET customer_name=:customer_name,
-             mobile=:mobile,
-             address=:address,
-             line_id=:line_id,
-             line_sequence=:line_sequence,
-             price_level_id=:price_level_id,
-             credit_limit=:credit_limit,
-             opening_balance=:opening_balance,
-             opening_can_balance=:opening_can_balance,
-             status=:status,
-             updated_at=NOW()
-         WHERE id=:id AND branch_id=:branch_id'
+    $openingState = customer_opening_stock_state(
+        $branchId,
+        $id,
+        (float)$old['opening_can_balance']
     );
-    $stmt->execute([
-        ':customer_name' => $clean['customer_name'],
-        ':mobile' => $clean['mobile'],
-        ':address' => $clean['address'],
-        ':line_id' => $clean['line_id'],
-        ':line_sequence' => $clean['line_sequence'],
-        ':price_level_id' => $clean['price_level_id'],
-        ':credit_limit' => $clean['credit_limit'],
-        ':opening_balance' => $clean['opening_balance'],
-        ':opening_can_balance' => $clean['opening_can_balance'],
-        ':status' => $clean['status'],
-        ':id' => $id,
-        ':branch_id' => $branchId,
-    ]);
 
-    audit_log((int)$user['id'], ACTION_UPDATE, [
-        'company_id' => (int)$context['company_id'],
-        'branch_id' => $branchId,
-        'menu_id' => (int)$access['menu']['id'],
-        'record_id' => $id,
-        'old_data' => $old,
-    ]);
+    $opening = customer_parse_opening_stocks($data, $branchId);
 
-    json_success('Customer updated successfully.', [
-        'customer' => customer_record($branchId, $id),
-    ]);
+    if ($openingState['locked']) {
+        /*
+         * Opening stock is historical and one-time.
+         * Ignore any browser attempt to overwrite it.
+         */
+        $openingCanBalance = (float)$old['opening_can_balance'];
+        $openingItemsToInsert = [];
+    } else {
+        $openingCanBalance = (float)$opening['total_base_qty'];
+        $openingItemsToInsert = $opening['items'];
+    }
+
+    $pdo = db();
+    $pdo->beginTransaction();
+
+    try {
+        $stmt = $pdo->prepare(
+            'UPDATE customers
+             SET customer_name=:customer_name,
+                 mobile=:mobile,
+                 address=:address,
+                 line_id=:line_id,
+                 line_sequence=:line_sequence,
+                 price_level_id=:price_level_id,
+                 credit_limit=:credit_limit,
+                 opening_balance=:opening_balance,
+                 opening_can_balance=:opening_can_balance,
+                 status=:status,
+                 updated_at=NOW()
+             WHERE id=:id AND branch_id=:branch_id'
+        );
+
+        $stmt->execute([
+            ':customer_name' => $clean['customer_name'],
+            ':mobile' => $clean['mobile'],
+            ':address' => $clean['address'],
+            ':line_id' => $clean['line_id'],
+            ':line_sequence' => $clean['line_sequence'],
+            ':price_level_id' => $clean['price_level_id'],
+            ':credit_limit' => $clean['credit_limit'],
+            ':opening_balance' => $clean['opening_balance'],
+            ':opening_can_balance' => $openingCanBalance,
+            ':status' => $clean['status'],
+            ':id' => $id,
+            ':branch_id' => $branchId,
+        ]);
+
+        if (!$openingState['locked'] && $openingItemsToInsert) {
+            customer_save_opening_stocks(
+                $pdo,
+                $branchId,
+                $id,
+                $openingItemsToInsert,
+                (int)$user['id']
+            );
+        }
+
+        audit_log((int)$user['id'], ACTION_UPDATE, [
+            'company_id' => (int)$context['company_id'],
+            'branch_id' => $branchId,
+            'menu_id' => (int)$access['menu']['id'],
+            'record_id' => $id,
+            'old_data' => $old,
+        ]);
+
+        $pdo->commit();
+
+        $customer = customer_record($branchId, $id);
+
+        json_success('Customer updated successfully.', [
+            'customer' => $customer,
+            'opening_stock' => customer_opening_stock_state(
+                $branchId,
+                $id,
+                (float)$customer['opening_can_balance']
+            ),
+        ]);
+
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
 }
 
 if ($method === 'PATCH') {

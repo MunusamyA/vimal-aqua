@@ -92,8 +92,18 @@ $pageTitle='Sales';
             <label>Outstanding</label>
             <input id="customerOutstanding" type="text" readonly placeholder="₹0.00">
         </div>
+        <div class="field returnable-summary-field compact-info-field">
+            <label>Returnable Cans</label>
+            <input id="customerReturnableTotal" type="text" readonly value="0.000">
+        </div>
     </div>
 
+
+    <div class="pos-supply-line compact-status-line" id="customerReturnableSummary" hidden>
+        <strong>Returnable Cans:</strong>
+        <span id="customerReturnableCount">0</span>
+        <span id="customerReturnableBreakdown" class="muted"></span>
+    </div>
 
     <div class="pos-supply-line compact-status-line">
         <strong id="stockSourceLabel">Plant Stock</strong>
@@ -106,12 +116,12 @@ $pageTitle='Sales';
     <div class="pos-section-head"><div><h2>Product Entry</h2><p id="productEntryHelp" hidden></p></div></div>
     <div class="product-entry-scroll">
         <div class="aqua-product-entry-grid">
-            <div class="field product-col"><label for="entryProduct">Product</label><select id="entryProduct"><option value="">Select Product</option></select></div>
+            <div class="field product-col"><label for="entryProduct">Product <span class="muted">(Select Customer first)</span></label><select id="entryProduct"><option value="">Select Product</option></select></div>
             <div class="field stock-col compact-stock"><label id="entryStockLabel">Available</label><div class="compact-stock-value" id="entryStockText">0.000</div><input id="entryStock" type="hidden" value="0"></div>
             <div class="field order-pending-col" id="entryOrderPendingField" hidden><label>Order Pending</label><input id="entryOrderPending" type="text" readonly placeholder="0.000"></div>
             <div class="field qty-col"><label id="primaryQtyLabel" for="primaryQty">Primary Qty</label><input id="primaryQty" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="3" placeholder="0.000"></div>
             <div class="field qty-col" id="secondaryQtyField"><label id="secondaryQtyLabel" for="secondaryQty">Secondary Qty</label><input id="secondaryQty" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="3" placeholder="0.000" disabled></div>
-            <div class="field rate-col"><label for="primaryRate">Primary Rate</label><input id="primaryRate" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
+            <div class="field rate-col"><label id="primaryRateLabel" for="primaryRate">Main Rate</label><input id="primaryRate" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
             <div class="field discount-col discount-field"><label for="discountType">Disc Type</label><select id="discountType"><option value="1">None</option><option value="2">%</option><option value="3">Amount</option></select></div>
             <div class="field discount-col discount-field"><label for="discountValue">Discount</label><input id="discountValue" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
             <div class="field can-col reusable-field" hidden><label>Previous Can Bal.</label><input id="previousCanBalance" type="text" readonly placeholder="0.000"></div>
@@ -128,7 +138,7 @@ $pageTitle='Sales';
         <table class="pos-items-table" id="salesItemsTable">
             <thead><tr>
                 <th>#</th><th>Product</th><th id="stockColumnHead">Stock</th><th class="order-column">Order Pending</th>
-                <th>Primary Qty</th><th>Secondary Qty</th><th>Primary Rate</th><th class="discount-column">Discount Type</th><th class="discount-column">Discount Amount</th>
+                <th id="primaryQtyColumnHead">Main Qty</th><th id="secondaryQtyColumnHead">Base Qty</th><th id="primaryRateColumnHead">Main Rate</th><th class="discount-column">Discount Type</th><th class="discount-column">Discount Amount</th>
                 <th class="reusable-column">Empty</th><th class="reusable-column">Damaged</th><th class="tax-column">Tax</th><th>Amount</th><th></th>
             </tr></thead>
             <tbody id="salesItemsBody"><tr><td class="empty" colspan="14">No Products added.</td></tr></tbody>
@@ -353,6 +363,8 @@ $pageTitle='Sales';
         sourceOrders: [],
         sourceOrderMap: {},
         reusableBalances: {},
+        reusableTotal: 0,
+        legacyUnallocatedOpeningCan: 0,
         activeTrip: null,
         currentSaleNo: "",
         payments: [],
@@ -375,6 +387,27 @@ $pageTitle='Sales';
         return "₹" + numberValue(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
     function decimal3(value) { return numberValue(value).toFixed(3); }
+
+    function qtyText(value) {
+        var n = round(numberValue(value), 3);
+
+        /*
+         * Friendly quantity display:
+         * 12      -> 12
+         * 12.5    -> 12.5
+         * 12.125  -> 12.125
+         *
+         * Keep calculation precision at 3 decimals but avoid unnecessary
+         * trailing zeros in conversion / stock descriptions.
+         */
+        if (Math.abs(n - Math.round(n)) < 0.0005) {
+            return String(Math.round(n));
+        }
+
+        return n.toFixed(3)
+            .replace(/0+$/, "")
+            .replace(/\.$/, "");
+    }
     function escapeHtml(value) {
         return String(value === null || value === undefined ? "" : value)
             .replace(/&/g, "&amp;")
@@ -510,7 +543,19 @@ $pageTitle='Sales';
         } else {
             customerSelect.setOptions(optionRows(state.customers, customerText), preserve.customer || byId("customerId").value || "");
         }
-        productSelect.setOptions(optionRows(state.products, productText), preserve.product || "");
+        var selectedCustomerForProducts = Number(
+            preserve.customer || byId("customerId").value || 0
+        );
+
+        if (!isLineMode() && !selectedCustomerForProducts) {
+            productSelect.setOptions([], "");
+            byId("entryProduct").value = "";
+        } else {
+            productSelect.setOptions(
+                optionRows(state.products, productText),
+                preserve.product || ""
+            );
+        }
         vehicleSelect.setOptions(optionRows(state.vehicles, vehicleText), preserve.vehicle || byId("vehicleId").value || "");
         lineSelect.setOptions(optionRows(state.lines, lineText), preserve.line || byId("lineId").value || "");
         renderPaymentAccounts();
@@ -566,6 +611,7 @@ $pageTitle='Sales';
             row.hidden = state.taxMode === 0 || !hasAction(ACTION_MANAGE_TAX);
         });
         recalculateAll();
+        refreshEntryUnitSummary();
         if (!reference) loadPreviewNumber();
     }
 
@@ -658,6 +704,15 @@ $pageTitle='Sales';
         }
         byId("sourceOrder").disabled = state.locked || (lineMode && !currentCustomerId());
 
+        /*
+         * Customer determines the selling price level.
+         * Do not allow Product selection before Customer is selected.
+         */
+        byId("entryProduct").disabled =
+            state.locked ||
+            !currentCustomerId() ||
+            (lineMode && !state.activeTrip);
+
         paymentRows().forEach(function (row) {
             var account = row.querySelector(".pay-account");
             var amount = row.querySelector(".pay-amount");
@@ -684,6 +739,114 @@ $pageTitle='Sales';
     function canSaveCurrentMode() {
         if (state.mode === MODE_QUOTATION) return hasAction(ACTION_SAVE_DRAFT);
         return hasAction(ACTION_POST);
+    }
+
+    function replaceProductInState(product) {
+        if (!product || !product.id) return;
+
+        var id = Number(product.id);
+
+        function replaceIn(list) {
+            var found = false;
+            list = (list || []).map(function (row) {
+                if (Number(row.id) === id) {
+                    found = true;
+                    return product;
+                }
+                return row;
+            });
+
+            if (!found) list.push(product);
+            return list;
+        }
+
+        state.products = replaceIn(state.products);
+        state.masterProducts = replaceIn(state.masterProducts);
+        rebuildMaps();
+    }
+
+    function clearEntryForCustomerChange() {
+        byId("entryProduct").value = "";
+        productSelect.setOptions([], "");
+        ["primaryQty","secondaryQty","primaryRate","discountValue","emptyReturn","damagedReturn","previousCanBalance","entryOrderPending"].forEach(function (id) {
+            byId(id).value = "";
+        });
+        byId("discountType").value = "1";
+        refreshEntryProduct();
+    }
+
+    async function handleProductChange() {
+        var productId = Number(byId("entryProduct").value || 0);
+
+        if (!productId) {
+            refreshEntryProduct();
+            updateItemColumnHeaders();
+            return;
+        }
+
+        var customerId = currentCustomerId();
+        if (!customerId) {
+            showWarning("Select Customer before Product.");
+            clearEntryForCustomerChange();
+            applyModeUI();
+            return;
+        }
+
+        /*
+         * Always refresh the selected Product from the server.
+         * This guarantees current:
+         * - Plant / Truck Stock
+         * - Customer Price Level price
+         * - normalized Main/Base Unit orientation
+         * - Customer returnable balance for this Product
+         */
+        try {
+            var url =
+                "api/sales.php?product_context=1" +
+                "&product_id=" + encodeURIComponent(productId) +
+                "&customer_id=" + encodeURIComponent(customerId) +
+                "&mode=" + encodeURIComponent(state.mode);
+
+            if (isLineMode()) {
+                url += "&vehicle_id=" + encodeURIComponent(currentVehicleId());
+                if (currentLineId()) {
+                    url += "&line_id=" + encodeURIComponent(currentLineId());
+                }
+            }
+
+            var result = await App.api(url);
+            var fresh = result.data.product || null;
+
+            if (fresh) {
+                replaceProductInState(fresh);
+
+                if (
+                    Number(fresh.container_type) === 1 &&
+                    result.data.product.customer_can_balance !== undefined
+                ) {
+                    state.reusableBalances[String(fresh.id)] =
+                        numberValue(fresh.customer_can_balance);
+                }
+
+                productSelect.setOptions(
+                    optionRows(state.products, productText),
+                    String(productId)
+                );
+                byId("entryProduct").value = String(productId);
+            }
+
+            if (result.data.trip && isLineMode()) {
+                state.activeTrip = result.data.trip;
+            }
+
+            refreshEntryProduct();
+            renderCustomerReturnableSummary();
+            updateItemColumnHeaders(fresh || currentProduct());
+        } catch (error) {
+            byId("entryProduct").value = "";
+            refreshEntryProduct();
+            reportError(error, "Unable to load Product stock / price.");
+        }
     }
 
     async function reloadStandardOptions(customerId) {
@@ -885,11 +1048,61 @@ $pageTitle='Sales';
         if (current && state.sourceOrderMap[current]) select.value = current;
     }
 
+    function renderCustomerReturnableSummary() {
+        var wrap = byId("customerReturnableSummary");
+        var totalNode = byId("customerReturnableCount");
+        var breakdownNode = byId("customerReturnableBreakdown");
+
+        var totalInput = byId("customerReturnableTotal");
+
+        if (!currentCustomerId()) {
+            wrap.hidden = true;
+            totalNode.textContent = "0";
+            if (totalInput) totalInput.value = "0.000";
+            breakdownNode.textContent = "";
+            return;
+        }
+
+        totalNode.textContent = decimal3(state.reusableTotal);
+        if (totalInput) totalInput.value = decimal3(state.reusableTotal);
+
+        var parts = [];
+
+        Object.keys(state.reusableBalances).forEach(function (productId) {
+            var balance = numberValue(state.reusableBalances[productId]);
+            if (Math.abs(balance) <= 0.0005) return;
+
+            var product = state.productMap[String(productId)] || null;
+            var productName = product
+                ? product.product_name
+                : "Product #" + productId;
+
+            parts.push(productName + ": " + decimal3(balance));
+        });
+
+        if (state.legacyUnallocatedOpeningCan > 0.0005) {
+            parts.push(
+                "Legacy opening (unallocated): " +
+                decimal3(state.legacyUnallocatedOpeningCan)
+            );
+        }
+
+        breakdownNode.textContent = parts.length
+            ? "· " + parts.join(" · ")
+            : "· No pending returnable cans";
+
+        wrap.hidden = false;
+    }
+
     async function loadCustomerSummaryAndOrders() {
         var customerId = currentCustomerId();
         state.reusableBalances = {};
+        state.reusableTotal = 0;
+        state.legacyUnallocatedOpeningCan = 0;
+
         if (!customerId) {
             byId("customerOutstanding").value = "";
+            renderCustomerReturnableSummary();
             state.sourceOrders = [];
             state.sourceOrderMap = {};
             state.sourceOrderAdvance = 0;
@@ -900,9 +1113,22 @@ $pageTitle='Sales';
         try {
             var summary = await App.api("api/sales.php?customer_summary=1&customer_id=" + customerId);
             byId("customerOutstanding").value = money(summary.data.outstanding || 0);
+
+            state.reusableTotal = numberValue(
+                summary.data.returnable_can_total || 0
+            );
+
+            state.legacyUnallocatedOpeningCan = numberValue(
+                summary.data.legacy_unallocated_opening_can || 0
+            );
+
             (summary.data.reusable_balances || []).forEach(function (row) {
-                state.reusableBalances[String(row.product_id)] = numberValue(row.can_balance);
+                state.reusableBalances[String(row.product_id)] =
+                    numberValue(row.can_balance);
             });
+
+            renderCustomerReturnableSummary();
+
             if (isInvoiceMode()) {
                 var orders = await App.api("api/sales.php?pending_orders=1&customer_id=" + customerId);
                 state.sourceOrders = orders.data.orders || [];
@@ -930,9 +1156,12 @@ $pageTitle='Sales';
             state.sourceOrderMap = {};
             state.sourceOrderAdvance = 0;
             state.reusableBalances = {};
+            state.reusableTotal = 0;
+            state.legacyUnallocatedOpeningCan = 0;
             renderSourceOrders();
             renderPayments();
             byId("customerOutstanding").value = "";
+            renderCustomerReturnableSummary();
         } else {
             await loadCustomerSummaryAndOrders();
         }
@@ -948,9 +1177,20 @@ $pageTitle='Sales';
             state.sourceOrders = [];
             state.sourceOrderMap = {};
             state.sourceOrderAdvance = 0;
+            state.reusableBalances = {};
+            state.reusableTotal = 0;
+            state.legacyUnallocatedOpeningCan = 0;
             renderSourceOrders();
             renderPayments();
             byId("customerOutstanding").value = "";
+            renderCustomerReturnableSummary();
+            clearEntryForCustomerChange();
+
+            if (!isLineMode()) {
+                state.products = [];
+                state.productMap = {};
+            }
+
             if (isLineMode()) {
                 if (currentVehicleId()) await loadLineContext();
                 else clearActiveLineTrip();
@@ -966,8 +1206,18 @@ $pageTitle='Sales';
         } else {
             try {
                 await reloadStandardOptions(customerId);
-                customerSelect.setOptions(optionRows(state.customers, customerText), String(customerId));
+                customerSelect.setOptions(
+                    optionRows(state.customers, customerText),
+                    String(customerId)
+                );
                 byId("customerId").value = String(customerId);
+
+                productSelect.setOptions(
+                    optionRows(state.products, productText),
+                    ""
+                );
+                byId("entryProduct").value = "";
+                refreshEntryProduct();
             } catch (error) {
                 reportError(error, "Unable to load Customer pricing.");
             }
@@ -975,18 +1225,290 @@ $pageTitle='Sales';
         }
     }
 
-    function secondaryConversion(product) {
-        return product && product.secondary_unit ? Math.max(1, numberValue(product.secondary_unit.conversion_qty)) : 0;
+    function primaryConversion(product) {
+        return product && product.primary_unit
+            ? Math.max(1, numberValue(product.primary_unit.conversion_qty || 1))
+            : 1;
     }
+
+    function secondaryConversion(product) {
+        return product && product.secondary_unit
+            ? Math.max(1, numberValue(product.secondary_unit.conversion_qty || 1))
+            : 0;
+    }
+
+    function secondaryRateFor(product, primaryRate) {
+        if (!product || !product.secondary_unit) return 0;
+
+        return round(
+            numberValue(primaryRate) *
+            secondaryConversion(product) /
+            primaryConversion(product),
+            2
+        );
+    }
+
+    function unitConversionText(product) {
+        if (!product || !product.primary_unit) return "";
+
+        var primaryName = unitName(product.primary_unit);
+        var primaryConv = primaryConversion(product);
+
+        if (!product.secondary_unit) {
+            return "Primary: " + primaryName +
+                " · Conversion " + qtyText(primaryConv);
+        }
+
+        var secondaryName = unitName(product.secondary_unit);
+        var secondaryConv = secondaryConversion(product);
+
+        if (primaryConv >= secondaryConv) {
+            return "1 " + primaryName +
+                " = " + qtyText(primaryConv / secondaryConv) +
+                " " + secondaryName;
+        }
+
+        return "1 " + secondaryName +
+            " = " + qtyText(secondaryConv / primaryConv) +
+            " " + primaryName;
+    }
+
     function itemBaseQty(item) {
         var product = state.productMap[String(item.product_id)] || item.snapshot || {};
-        var primaryConv = Math.max(1, numberValue(product.primary_unit && product.primary_unit.conversion_qty || 1));
+        var primaryConv = primaryConversion(product);
         var secondaryConv = secondaryConversion(product);
-        return round(numberValue(item.primary_qty) * primaryConv + numberValue(item.secondary_qty) * secondaryConv, 3);
+
+        return round(
+            numberValue(item.primary_qty) * primaryConv +
+            numberValue(item.secondary_qty) * secondaryConv,
+            3
+        );
     }
+
+    function refreshEntryUnitSummary() {
+        var product = currentProduct();
+        var help = byId("productEntryHelp");
+        var addButton = byId("addProductButton");
+
+        if (!product) {
+            help.hidden = true;
+            help.textContent = "";
+            byId("entryStock").value = "0";
+            byId("entryStockText").textContent = "0.000";
+            addButton.disabled = false;
+            return;
+        }
+
+        var draft = entryDraftItem(product);
+        var primaryQty = Math.max(0, numberValue(draft.primary_qty));
+        var secondaryQty = product.secondary_unit
+            ? Math.max(0, numberValue(draft.secondary_qty))
+            : 0;
+
+        var baseQty = round(
+            primaryQty * primaryConversion(product) +
+            secondaryQty * secondaryConversion(product),
+            3
+        );
+
+        var primaryRate = Math.max(0, numberValue(draft.primary_rate));
+        var secondaryRate = secondaryRateFor(product, primaryRate);
+        var calc = itemCalculation(draft);
+
+        var taxPreview = itemTax(draft, calc.after);
+        var lineTotal = round(taxPreview.net, 2);
+
+        var available = productStock(product);
+        byId("entryStock").value = decimal3(available);
+        byId("entryStockText").textContent = formatStockQuantity(product, available);
+
+        var stockCheck = entryStockValidation(product, baseQty);
+
+        var parts = [
+            unitConversionText(product),
+            "Base Qty: " + decimal3(baseQty) + " " + unitName(baseUnit(product))
+        ];
+
+        if (product.secondary_unit && primaryRate > 0) {
+            parts.push(
+                unitName(product.secondary_unit) +
+                " Rate: ₹" +
+                secondaryRate.toFixed(2)
+            );
+        }
+
+        parts.push("Gross: " + money(calc.gross));
+
+        if (calc.discount > 0) {
+            parts.push("Item Discount: " + money(calc.discount));
+        }
+
+        if (state.taxMode === 1 && taxPreview.tax > 0) {
+            parts.push("Tax: " + money(taxPreview.tax));
+        }
+
+        parts.push("Line Total: " + money(lineTotal));
+
+        if (isInvoiceMode()) {
+            if (stockCheck.ok) {
+                parts.push(
+                    "After Sale: " +
+                    formatStockQuantity(product, stockCheck.remaining)
+                );
+            } else {
+                parts.push("⚠ " + stockCheck.message);
+            }
+        } else {
+            parts.push("No stock deduction in " + (state.mode === MODE_ORDER ? "Customer Order" : "Quotation"));
+        }
+
+        var orderItem = linkedOrderItemForProduct(product.id);
+        if (orderItem && baseQty > numberValue(orderItem.pending_base_qty) + 0.0005) {
+            parts.push(
+                "⚠ Exceeds Order Pending by " +
+                decimal3(baseQty - numberValue(orderItem.pending_base_qty))
+            );
+        }
+
+        help.textContent = parts.join(" · ");
+        help.hidden = false;
+
+        var hasQty = baseQty > 0.0005;
+        var orderOk = !orderItem ||
+            baseQty <= numberValue(orderItem.pending_base_qty) + 0.0005;
+
+        addButton.disabled = state.locked ||
+            !hasQty ||
+            !stockCheck.ok ||
+            !orderOk;
+    }
+
     function productStock(product) {
         if (!product) return 0;
         return isLineMode() ? numberValue(product.truck_stock) : numberValue(product.plant_stock);
+    }
+
+    function isPostedInvoiceBeingEdited() {
+        return !!reference &&
+            Number(state.documentType) === 2 &&
+            Number(state.status) === 2 &&
+            isInvoiceMode();
+    }
+
+    function availableStockForItem(product, item) {
+        var available = productStock(product);
+
+        /*
+         * Existing posted Invoice stock is already deducted from current stock.
+         * Backend reverses that old Invoice before validating the edited Invoice.
+         * Add the original item Base Qty back in the browser too so live validation
+         * matches the backend edit transaction.
+         */
+        if (
+            isPostedInvoiceBeingEdited() &&
+            item &&
+            Number(item.item_id || 0) > 0
+        ) {
+            available += numberValue(item.original_base_qty || 0);
+        }
+
+        return round(available, 3);
+    }
+
+    function baseUnit(product) {
+        if (!product || !product.primary_unit) return null;
+        if (!product.secondary_unit) return product.primary_unit;
+
+        return secondaryConversion(product) <= primaryConversion(product)
+            ? product.secondary_unit
+            : product.primary_unit;
+    }
+
+    function formatStockQuantity(product, baseQty) {
+        baseQty = Math.max(0, numberValue(baseQty));
+
+        if (!product || !product.primary_unit) {
+            return decimal3(baseQty);
+        }
+
+        var primary = product.primary_unit;
+        var secondary = product.secondary_unit;
+        var pc = primaryConversion(product);
+
+        if (!secondary) {
+            var onlyQty = pc > 0 ? baseQty / pc : baseQty;
+            return qtyText(onlyQty) + " " + unitName(primary) +
+                " (" + decimal3(baseQty) + " base)";
+        }
+
+        var sc = secondaryConversion(product);
+
+        if (pc > sc) {
+            var pQty = Math.floor((baseQty / pc) + 0.0000001);
+            var remBase = Math.max(0, round(baseQty - pQty * pc, 3));
+            var sQty = sc > 0 ? round(remBase / sc, 3) : 0;
+
+            return qtyText(pQty) + " " + unitName(primary) +
+                " + " + qtyText(sQty) + " " + unitName(secondary) +
+                " (" + decimal3(baseQty) + " base)";
+        }
+
+        if (sc > pc) {
+            var sLargeQty = Math.floor((baseQty / sc) + 0.0000001);
+            var rem = Math.max(0, round(baseQty - sLargeQty * sc, 3));
+            var pSmallQty = pc > 0 ? round(rem / pc, 3) : 0;
+
+            return qtyText(pSmallQty) + " " + unitName(primary) +
+                " + " + qtyText(sLargeQty) + " " + unitName(secondary) +
+                " (" + decimal3(baseQty) + " base)";
+        }
+
+        return decimal3(baseQty) + " " + unitName(baseUnit(product));
+    }
+
+    function entryDraftItem(product) {
+        return {
+            product_id: Number(product ? product.id : 0),
+            primary_qty: numberValue(byId("primaryQty").value),
+            secondary_qty: product && product.secondary_unit
+                ? numberValue(byId("secondaryQty").value)
+                : 0,
+            primary_rate: numberValue(byId("primaryRate").value),
+            discount_type: Number(byId("discountType").value || 1),
+            discount_value: numberValue(byId("discountValue").value),
+            snapshot: product || {}
+        };
+    }
+
+    function entryStockValidation(product, baseQty) {
+        if (!product) {
+            return { ok: false, message: "Select Product." };
+        }
+
+        if (!isInvoiceMode()) {
+            return { ok: true, available: productStock(product), remaining: productStock(product) };
+        }
+
+        var available = availableStockForItem(product, null);
+        var remaining = round(available - baseQty, 3);
+
+        if (baseQty > available + 0.0005) {
+            return {
+                ok: false,
+                available: available,
+                remaining: remaining,
+                shortage: round(baseQty - available, 3),
+                message: (isLineMode() ? "Truck" : "Plant") +
+                    " Stock insufficient by " +
+                    decimal3(baseQty - available) + " base units."
+            };
+        }
+
+        return {
+            ok: true,
+            available: available,
+            remaining: Math.max(0, remaining)
+        };
     }
 
     function refreshEntryProduct() {
@@ -998,22 +1520,38 @@ $pageTitle='Sales';
         byId("entryOrderPending").value = "";
 
         if (!product) {
-            byId("primaryQtyLabel").textContent = "Primary Qty";
-            byId("secondaryQtyLabel").textContent = "Secondary Qty";
+            byId("primaryQtyLabel").textContent = "Main Qty";
+            byId("secondaryQtyLabel").textContent = "Base Qty";
+            byId("primaryRateLabel").textContent = "Main Rate";
+            updateItemColumnHeaders();
             byId("entryStock").value = "0"; byId("entryStockText").textContent = "0.000";
             byId("primaryRate").value = "";
             secondary.disabled = true;
             secondary.value = "";
+            refreshEntryUnitSummary();
             return;
         }
 
-        byId("primaryQtyLabel").textContent = unitName(product.primary_unit) + " Qty";
-        byId("secondaryQtyLabel").textContent = product.secondary_unit ? unitName(product.secondary_unit) + " Qty" : "Secondary Qty";
+        byId("primaryQtyLabel").textContent =
+            unitName(product.primary_unit) + " Qty";
+
+        byId("secondaryQtyLabel").textContent =
+            product.secondary_unit
+                ? unitName(product.secondary_unit) + " Qty"
+                : "Base Qty";
+
+        byId("primaryRateLabel").textContent =
+            unitName(product.primary_unit) + " Rate";
+
+        updateItemColumnHeaders(product);
         secondary.disabled = !product.secondary_unit || state.locked;
         if (!product.secondary_unit) secondary.value = "";
-        byId("entryStock").value = decimal3(productStock(product)); byId("entryStockText").textContent = decimal3(productStock(product));
+        byId("entryStock").value = decimal3(productStock(product));
+        byId("entryStockText").textContent = formatStockQuantity(product, productStock(product));
         byId("primaryRate").value = numberValue(product.primary_price) > 0 ? numberValue(product.primary_price).toFixed(2) : "";
         byId("primaryRate").readOnly = state.locked || (state.ref ? !hasAction(ACTION_UPDATE) : !hasAction(ACTION_CREATE));
+
+        refreshEntryUnitSummary();
 
         var selectedOrder = state.sourceOrderMap[byId("sourceOrder").value] || null;
         if (selectedOrder) {
@@ -1061,7 +1599,30 @@ $pageTitle='Sales';
         var primaryQty = numberValue(byId("primaryQty").value);
         var secondaryQty = product.secondary_unit ? numberValue(byId("secondaryQty").value) : 0;
         if (primaryQty <= 0 && secondaryQty <= 0) { showWarning("Enter quantity."); return; }
+
+        var draftBaseQty = round(
+            primaryQty * primaryConversion(product) +
+            secondaryQty * secondaryConversion(product),
+            3
+        );
+
+        var stockCheck = entryStockValidation(product, draftBaseQty);
+        if (!stockCheck.ok) {
+            showWarning(stockCheck.message);
+            return;
+        }
+
         var orderItem = linkedOrderItemForProduct(product.id);
+        if (
+            orderItem &&
+            draftBaseQty > numberValue(orderItem.pending_base_qty) + 0.0005
+        ) {
+            showWarning(
+                "Quantity exceeds pending Customer Order quantity. Pending: " +
+                decimal3(orderItem.pending_base_qty)
+            );
+            return;
+        }
         state.items.push({
             item_id: 0,
             product_id: Number(product.id),
@@ -1077,6 +1638,7 @@ $pageTitle='Sales';
             order_pending_base_qty: orderItem ? numberValue(orderItem.pending_base_qty) : 0,
             ordered_base_qty: state.mode === MODE_ORDER ? 0 : 0,
             delivered_base_qty: 0,
+            original_base_qty: 0,
             snapshot: product
         });
         renderItems();
@@ -1102,12 +1664,15 @@ $pageTitle='Sales';
                 return;
             }
             if (state.items.some(function (item) { return Number(item.product_id) === Number(orderItem.product_id); })) return;
+            var normalizedOrderItem =
+                remapStoredItemToCurrentUnits(orderItem, product);
+
             state.items.push({
                 item_id: 0,
                 product_id: Number(orderItem.product_id),
                 primary_qty: 0,
                 secondary_qty: 0,
-                primary_rate: numberValue(orderItem.rate),
+                primary_rate: normalizedOrderItem.primary_rate,
                 discount_type: Number(orderItem.discount_type || 1),
                 discount_value: numberValue(orderItem.discount_value),
                 empty_return_qty: 0,
@@ -1117,6 +1682,7 @@ $pageTitle='Sales';
                 order_pending_base_qty: numberValue(orderItem.pending_base_qty),
                 ordered_base_qty: numberValue(orderItem.ordered_base_qty),
                 delivered_base_qty: numberValue(orderItem.delivered_base_qty),
+                original_base_qty: 0,
                 snapshot: product
             });
         });
@@ -1127,8 +1693,15 @@ $pageTitle='Sales';
 
     function itemCalculation(item) {
         var product = state.productMap[String(item.product_id)] || item.snapshot || {};
-        var secondaryConv = secondaryConversion(product);
-        var gross = round(numberValue(item.primary_qty) * numberValue(item.primary_rate) + numberValue(item.secondary_qty) * (numberValue(item.primary_rate) * secondaryConv), 2);
+        var primaryRate = numberValue(item.primary_rate);
+        var secondaryRate = secondaryRateFor(product, primaryRate);
+
+        var gross = round(
+            numberValue(item.primary_qty) * primaryRate +
+            numberValue(item.secondary_qty) * secondaryRate,
+            2
+        );
+
         var discount = 0;
         if (Number(item.discount_type) === 2) discount = round(gross * Math.min(100, numberValue(item.discount_value)) / 100, 2);
         else if (Number(item.discount_type) === 3) discount = Math.min(gross, round(item.discount_value, 2));
@@ -1169,7 +1742,53 @@ $pageTitle='Sales';
         });
     }
 
+    function updateItemColumnHeaders(productHint) {
+        var primaryNames = {};
+        var secondaryNames = {};
+
+        state.items.forEach(function (item) {
+            var product =
+                state.productMap[String(item.product_id)] ||
+                item.snapshot ||
+                {};
+
+            if (product.primary_unit) {
+                primaryNames[unitName(product.primary_unit)] = true;
+            }
+
+            if (product.secondary_unit) {
+                secondaryNames[unitName(product.secondary_unit)] = true;
+            }
+        });
+
+        if (!state.items.length) {
+            var product = productHint || currentProduct();
+            if (product) {
+                if (product.primary_unit) {
+                    primaryNames[unitName(product.primary_unit)] = true;
+                }
+                if (product.secondary_unit) {
+                    secondaryNames[unitName(product.secondary_unit)] = true;
+                }
+            }
+        }
+
+        var pNames = Object.keys(primaryNames);
+        var sNames = Object.keys(secondaryNames);
+
+        byId("primaryQtyColumnHead").textContent =
+            pNames.length === 1 ? pNames[0] + " Qty" : "Main Qty";
+
+        byId("secondaryQtyColumnHead").textContent =
+            sNames.length === 1 ? sNames[0] + " Qty" : "Base Qty";
+
+        byId("primaryRateColumnHead").textContent =
+            pNames.length === 1 ? pNames[0] + " Rate" : "Main Rate";
+    }
+
     function renderItems() {
+        updateItemColumnHeaders();
+
         var body = byId("salesItemsBody");
         var mobile = byId("mobileItems");
         var showOrder = state.mode === MODE_ORDER || (isInvoiceMode() && !!byId("sourceOrder").value);
@@ -1201,9 +1820,12 @@ $pageTitle='Sales';
             return '<tr data-index="' + index + '">' +
                 '<td>' + (index + 1) + '</td>' +
                 '<td><strong>' + escapeHtml(product.product_name || "-") + '</strong><div class="muted">' + escapeHtml(product.hsn_code ? "HSN " + product.hsn_code : "") + '</div>' + deliveredInfo + '</td>' +
-                '<td class="stock-cell">' + decimal3(stock) + '</td>' +
+                '<td class="stock-cell js-live-stock">' +
+                    '<strong class="js-live-stock-available">' + escapeHtml(formatStockQuantity(product, stock)) + '</strong>' +
+                    '<div class="muted js-live-stock-status"></div>' +
+                '</td>' +
                 '<td class="order-column"' + (showOrder ? '' : ' hidden') + '>' + (orderPending > 0 ? '<strong>' + decimal3(orderPending) + '</strong>' : '—') + '</td>' +
-                '<td><input class="js-primary-qty" type="text" inputmode="decimal" value="' + (numberValue(item.primary_qty) || "") + '"' + disabled + '><div class="muted">' + escapeHtml(unitName(product.primary_unit)) + '</div></td>' +
+                '<td><input class="js-primary-qty" type="text" inputmode="decimal" value="' + (numberValue(item.primary_qty) || "") + '"' + disabled + '><div class="muted">' + escapeHtml(unitName(product.primary_unit)) + '</div><div class="muted js-live-base"></div></td>' +
                 '<td>' + (product.secondary_unit ? '<input class="js-secondary-qty" type="text" inputmode="decimal" value="' + (numberValue(item.secondary_qty) || "") + '"' + disabled + '><div class="muted">' + escapeHtml(unitName(product.secondary_unit)) + '</div>' : '—') + '</td>' +
                 '<td><input class="js-rate" type="text" inputmode="decimal" value="' + numberValue(item.primary_rate).toFixed(2) + '"' + rateReadonly + disabled + '></td>' +
                 '<td class="discount-column"' + (hasAction(ACTION_APPLY_DISCOUNT) ? '' : ' hidden') + '>' +
@@ -1213,7 +1835,7 @@ $pageTitle='Sales';
                 '<td class="reusable-column"' + (isInvoiceMode() ? '' : ' hidden') + '>' + (reusable ? '<input class="js-empty-return" type="text" inputmode="decimal" value="' + (numberValue(item.empty_return_qty) || "") + '"' + disabled + '>' : '—') + '</td>' +
                 '<td class="reusable-column"' + (isInvoiceMode() ? '' : ' hidden') + '>' + (reusable ? '<input class="js-damaged-return" type="text" inputmode="decimal" value="' + (numberValue(item.damaged_return_qty) || "") + '"' + disabled + '>' : '—') + '</td>' +
                 '<td class="tax-column"' + ((state.taxMode === 0 || !hasAction(ACTION_MANAGE_TAX)) ? ' hidden' : '') + '>' + (taxPct ? taxPct.toFixed(2) + '%' : '0%') + '</td>' +
-                '<td class="amount-cell">' + money(calc.after) + '</td>' +
+                '<td class="amount-cell js-live-amount">' + money(calc.after) + '</td>' +
                 '<td class="remove-cell">' + (state.locked ? '' : '<button class="row-remove-button js-remove" type="button" title="Remove"><i data-lucide="trash-2"></i></button>') + '</td>' +
                 '</tr>';
         }).join("");
@@ -1228,7 +1850,7 @@ $pageTitle='Sales';
             return '<div class="mobile-item-card" data-mobile-index="' + index + '">' +
                 '<div class="mobile-item-top"><span class="mobile-item-number">' + escapeHtml(product.product_name || "-") + '</span>' +
                 (state.locked ? '' : '<button class="row-remove-button js-mobile-remove" type="button"><i data-lucide="trash-2"></i></button>') + '</div>' +
-                '<div class="mobile-item-meta"><span>Available ' + decimal3(productStock(product)) + '</span>' + (orderPending > 0 ? '<span>Pending ' + decimal3(orderPending) + '</span>' : '') + '</div>' +
+                '<div class="mobile-item-meta"><span class="js-mobile-stock-meta">Available ' + decimal3(productStock(product)) + '</span>' + (orderPending > 0 ? '<span>Pending ' + decimal3(orderPending) + '</span>' : '') + '</div>' +
                 '<div class="mobile-item-grid">' +
                 '<div class="field"><label>' + escapeHtml(unitName(product.primary_unit)) + ' Qty</label><input class="js-mobile-primary" type="text" inputmode="decimal" value="' + (numberValue(item.primary_qty) || "") + '"' + (state.locked ? ' disabled' : '') + '></div>' +
                 (product.secondary_unit ? '<div class="field"><label>' + escapeHtml(unitName(product.secondary_unit)) + ' Qty</label><input class="js-mobile-secondary" type="text" inputmode="decimal" value="' + (numberValue(item.secondary_qty) || "") + '"' + (state.locked ? ' disabled' : '') + '></div>' : '') +
@@ -1237,7 +1859,7 @@ $pageTitle='Sales';
                 (hasAction(ACTION_APPLY_DISCOUNT) ? '<div class="field"><label>Discount Value</label><input class="js-mobile-discount-value" type="text" inputmode="decimal" value="' + (numberValue(item.discount_value) || "") + '"' + (state.locked ? ' readonly' : '') + '></div>' : '') +
                 (reusable ? '<div class="field"><label>Empty Return</label><input class="js-mobile-empty" type="text" inputmode="decimal" value="' + (numberValue(item.empty_return_qty) || "") + '"' + (state.locked ? ' readonly' : '') + '></div>' : '') +
                 (reusable ? '<div class="field"><label>Damaged Return</label><input class="js-mobile-damaged" type="text" inputmode="decimal" value="' + (numberValue(item.damaged_return_qty) || "") + '"' + (state.locked ? ' readonly' : '') + '></div>' : '') +
-                '</div><div class="mobile-item-total"><span>Amount</span><strong>' + money(calc.after) + '</strong></div></div>';
+                '</div><div class="mobile-item-total"><span>Amount</span><strong class="js-mobile-live-amount">' + money(calc.after) + '</strong></div></div>';
         }).join("");
 
         byId("itemsHelp").textContent = state.items.length + (state.items.length === 1 ? " Product" : " Products");
@@ -1274,12 +1896,240 @@ $pageTitle='Sales';
         if (document.activeElement !== value) value.value = byId("overallDiscountValue").value;
     }
 
+    function syncStateToMobileControls() {
+        all("#mobileItems .mobile-item-card[data-mobile-index]").forEach(function (card) {
+            var item = state.items[Number(card.getAttribute("data-mobile-index"))];
+            if (!item) return;
+
+            var map = [
+                [".js-mobile-primary", item.primary_qty],
+                [".js-mobile-secondary", item.secondary_qty],
+                [".js-mobile-rate", numberValue(item.primary_rate).toFixed(2)],
+                [".js-mobile-discount-type", String(Number(item.discount_type || 1))],
+                [".js-mobile-discount-value", item.discount_value],
+                [".js-mobile-empty", item.empty_return_qty],
+                [".js-mobile-damaged", item.damaged_return_qty]
+            ];
+
+            map.forEach(function (pair) {
+                var node = card.querySelector(pair[0]);
+                if (!node || document.activeElement === node) return;
+                node.value = pair[1] === 0 ? "" : String(pair[1] == null ? "" : pair[1]);
+            });
+        });
+    }
+
+    function syncStateToDesktopControls() {
+        all("#salesItemsBody tr[data-index]").forEach(function (row) {
+            var item = state.items[Number(row.getAttribute("data-index"))];
+            if (!item) return;
+
+            var map = [
+                [".js-primary-qty", item.primary_qty],
+                [".js-secondary-qty", item.secondary_qty],
+                [".js-rate", numberValue(item.primary_rate).toFixed(2)],
+                [".js-discount-type", String(Number(item.discount_type || 1))],
+                [".js-discount-value", item.discount_value],
+                [".js-empty-return", item.empty_return_qty],
+                [".js-damaged-return", item.damaged_return_qty]
+            ];
+
+            map.forEach(function (pair) {
+                var node = row.querySelector(pair[0]);
+                if (!node || document.activeElement === node) return;
+                node.value = pair[1] === 0 ? "" : String(pair[1] == null ? "" : pair[1]);
+            });
+        });
+    }
+
+    function refreshRenderedItemCalculations() {
+        var itemCalcs = state.items.map(function (item) {
+            return itemCalculation(item);
+        });
+
+        var discountBase = itemCalcs.reduce(function (sum, calc) {
+            return sum + numberValue(calc.after);
+        }, 0);
+
+        var overallType = Number(byId("overallDiscountType").value || 1);
+        var overallValue = numberValue(byId("overallDiscountValue").value);
+        var overall = 0;
+
+        if (hasAction(ACTION_APPLY_DISCOUNT)) {
+            if (overallType === 2) {
+                overall = round(
+                    discountBase * Math.min(100, overallValue) / 100,
+                    2
+                );
+            } else if (overallType === 3) {
+                overall = Math.min(discountBase, round(overallValue, 2));
+            }
+        }
+
+        state.items.forEach(function (item, index) {
+            var product =
+                state.productMap[String(item.product_id)] ||
+                item.snapshot ||
+                {};
+
+            var calc = itemCalcs[index];
+            var overallShare =
+                discountBase > 0
+                    ? overall * (calc.after / discountBase)
+                    : 0;
+
+            var taxableAfterDiscount = Math.max(
+                0,
+                round(calc.after - overallShare, 2)
+            );
+
+            var taxCalc = itemTax(item, taxableAfterDiscount);
+            var finalLineAmount = round(taxCalc.net, 2);
+
+            var baseQty = itemBaseQty(item);
+            var available = availableStockForItem(product, item);
+            var remaining = round(available - baseQty, 3);
+            var isShort = isInvoiceMode() && remaining < -0.0005;
+
+            var row = document.querySelector(
+                '#salesItemsBody tr[data-index="' + index + '"]'
+            );
+
+            if (row) {
+                var amount = row.querySelector(".js-live-amount");
+                if (amount) amount.textContent = money(finalLineAmount);
+
+                var availableNode =
+                    row.querySelector(".js-live-stock-available");
+
+                if (availableNode) {
+                    availableNode.textContent =
+                        formatStockQuantity(product, available);
+                }
+
+                var baseNode = row.querySelector(".js-live-base");
+                if (baseNode) {
+                    baseNode.textContent =
+                        "Base " +
+                        decimal3(baseQty) +
+                        " " +
+                        unitName(baseUnit(product));
+                }
+
+                var stockStatus =
+                    row.querySelector(".js-live-stock-status");
+
+                if (stockStatus) {
+                    if (!isInvoiceMode()) {
+                        stockStatus.textContent = "No stock effect";
+                    } else if (isShort) {
+                        stockStatus.textContent =
+                            "Short " +
+                            formatStockQuantity(
+                                product,
+                                Math.abs(remaining)
+                            );
+                    } else {
+                        stockStatus.textContent =
+                            "Remaining " +
+                            formatStockQuantity(
+                                product,
+                                Math.max(0, remaining)
+                            );
+                    }
+                }
+            }
+
+            var card = document.querySelector(
+                '#mobileItems .mobile-item-card[data-mobile-index="' +
+                index +
+                '"]'
+            );
+
+            if (card) {
+                var mobileAmount =
+                    card.querySelector(".js-mobile-live-amount");
+
+                if (mobileAmount) {
+                    mobileAmount.textContent = money(finalLineAmount);
+                }
+
+                var meta =
+                    card.querySelector(".js-mobile-stock-meta");
+
+                if (meta) {
+                    if (!isInvoiceMode()) {
+                        meta.textContent =
+                            "Base " +
+                            decimal3(baseQty) +
+                            " · No stock effect";
+                    } else if (isShort) {
+                        meta.textContent =
+                            "Available " +
+                            formatStockQuantity(product, available) +
+                            " · Short " +
+                            formatStockQuantity(
+                                product,
+                                Math.abs(remaining)
+                            );
+                    } else {
+                        meta.textContent =
+                            "Available " +
+                            formatStockQuantity(product, available) +
+                            " · Remaining " +
+                            formatStockQuantity(
+                                product,
+                                Math.max(0, remaining)
+                            );
+                    }
+                }
+            }
+        });
+    }
+
+    function validateLiveItemStocks(showMessage) {
+        if (!isInvoiceMode()) return true;
+
+        for (var i = 0; i < state.items.length; i += 1) {
+            var item = state.items[i];
+            var product = state.productMap[String(item.product_id)] || item.snapshot || {};
+            var required = itemBaseQty(item);
+            var available = availableStockForItem(product, item);
+
+            if (required > available + 0.0005) {
+                if (showMessage) {
+                    showWarning(
+                        (product.product_name || "Product") +
+                        " stock insufficient. Available " +
+                        decimal3(available) +
+                        ", required " +
+                        decimal3(required) +
+                        "."
+                    );
+                }
+                return false;
+            }
+
+            if (
+                item.source_order_item_id &&
+                numberValue(item.order_pending_base_qty) > 0 &&
+                required > numberValue(item.order_pending_base_qty) + 0.0005
+            ) {
+                if (showMessage) {
+                    showWarning(
+                        (product.product_name || "Product") +
+                        " exceeds Customer Order pending quantity."
+                    );
+                }
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     function recalculateAll() {
         syncMobileDiscountControls();
-        if (!state.loading) {
-            readItemRows();
-            syncMobileRows();
-        }
         var gross = 0;
         var itemDiscount = 0;
         var discountBase = 0;
@@ -1340,11 +2190,11 @@ $pageTitle='Sales';
         byId("receivedNow").textContent = money(received);
         byId("paymentBalance").textContent = money(balance);
         byId("roundOffButton").textContent = state.roundOffEnabled ? "Unround" : "Round Off";
+
+        refreshRenderedItemCalculations();
     }
 
     function payload() {
-        readItemRows();
-        syncMobileRows();
         return {
             ref: reference || undefined,
             mode: state.mode,
@@ -1371,13 +2221,15 @@ $pageTitle='Sales';
             if (!currentVehicleId()) { showWarning("Select Truck."); return false; }
             if (!state.activeTrip) { showWarning("No active Truck Loading found for the selected Truck" + (currentLineId() ? " and Line." : ".")); return false; }
         }
-        readItemRows();
         for (var i = 0; i < state.items.length; i += 1) {
             if (itemBaseQty(state.items[i]) <= 0.0005) {
                 showWarning("Enter quantity for " + ((state.productMap[String(state.items[i].product_id)] || state.items[i].snapshot || {}).product_name || "Product") + ".");
                 return false;
             }
         }
+
+        if (!validateLiveItemStocks(true)) return false;
+
         if ((isInvoiceMode() || state.mode === MODE_ORDER) && hasAction(ACTION_RECEIVE_PAYMENT) && readPayments(true) === null) return false;
         return true;
     }
@@ -1464,6 +2316,62 @@ $pageTitle='Sales';
         renderPayments();
     }
 
+    function remapStoredItemToCurrentUnits(row, product) {
+        var primaryQty = numberValue(row.primary_qty);
+        var secondaryQty = numberValue(row.secondary_qty);
+        var primaryRate = numberValue(row.rate);
+
+        if (
+            product &&
+            product.primary_unit &&
+            product.secondary_unit
+        ) {
+            var currentPrimaryId =
+                Number(product.primary_unit.product_unit_id || 0);
+
+            var currentSecondaryId =
+                Number(product.secondary_unit.product_unit_id || 0);
+
+            var storedPrimaryId =
+                Number(row.product_unit_id || 0);
+
+            var storedSecondaryId =
+                Number(row.secondary_product_unit_id || 0);
+
+            /*
+             * Existing legacy Sales row:
+             * stored Primary PCS + Secondary Box
+             *
+             * Current normalized Sales UI:
+             * Primary Box + Secondary PCS
+             */
+            if (
+                storedPrimaryId === currentSecondaryId &&
+                storedSecondaryId === currentPrimaryId
+            ) {
+                var oldPrimaryQty = primaryQty;
+                primaryQty = secondaryQty;
+                secondaryQty = oldPrimaryQty;
+
+                var storedPrimaryConversion =
+                    Math.max(1, numberValue(row.conversion_qty || 1));
+
+                primaryRate = round(
+                    primaryRate *
+                    primaryConversion(product) /
+                    storedPrimaryConversion,
+                    2
+                );
+            }
+        }
+
+        return {
+            primary_qty: primaryQty,
+            secondary_qty: secondaryQty,
+            primary_rate: primaryRate
+        };
+    }
+
     function normalizeLoadedItem(row) {
         var product = state.productMap[String(row.product_id)] || null;
         if (!product) {
@@ -1489,13 +2397,26 @@ $pageTitle='Sales';
                 plant_stock: 0,
                 truck_stock: 0
             };
+
+            if (
+                product.secondary_unit &&
+                numberValue(product.secondary_unit.conversion_qty) >
+                numberValue(product.primary_unit.conversion_qty)
+            ) {
+                var tmpUnit = product.primary_unit;
+                product.primary_unit = product.secondary_unit;
+                product.secondary_unit = tmpUnit;
+            }
         }
+
+        var normalizedStored = remapStoredItemToCurrentUnits(row, product);
+
         return {
             item_id: Number(row.id),
             product_id: Number(row.product_id),
-            primary_qty: numberValue(row.primary_qty),
-            secondary_qty: numberValue(row.secondary_qty),
-            primary_rate: numberValue(row.rate),
+            primary_qty: normalizedStored.primary_qty,
+            secondary_qty: normalizedStored.secondary_qty,
+            primary_rate: normalizedStored.primary_rate,
             discount_type: Number(row.discount_type || 1),
             discount_value: numberValue(row.discount_value),
             empty_return_qty: numberValue(row.empty_return_qty),
@@ -1505,6 +2426,7 @@ $pageTitle='Sales';
             order_pending_base_qty: numberValue(row.pending_base_qty),
             ordered_base_qty: numberValue(row.ordered_base_qty),
             delivered_base_qty: numberValue(row.delivered_base_qty),
+            original_base_qty: numberValue(row.base_qty),
             snapshot: product
         };
     }
@@ -1697,11 +2619,29 @@ $pageTitle='Sales';
         loadSelectedOrderItems();
         byId("entryOrderPendingField").hidden = !byId("sourceOrder").value;
     });
-    byId("entryProduct").addEventListener("change", refreshEntryProduct);
+    byId("entryProduct").addEventListener("change", handleProductChange);
+
+    ["primaryQty","secondaryQty","primaryRate","discountValue"].forEach(function (id) {
+        byId(id).addEventListener("input", refreshEntryUnitSummary);
+    });
+
+    byId("discountType").addEventListener("change", refreshEntryUnitSummary);
     byId("addProductButton").addEventListener("click", addProductFromEntry);
 
-    byId("salesItemsBody").addEventListener("input", recalculateAll);
-    byId("salesItemsBody").addEventListener("change", recalculateAll);
+    function recalculateFromDesktop() {
+        readItemRows();
+        syncStateToMobileControls();
+        recalculateAll();
+    }
+
+    function recalculateFromMobile() {
+        syncMobileRows();
+        syncStateToDesktopControls();
+        recalculateAll();
+    }
+
+    byId("salesItemsBody").addEventListener("input", recalculateFromDesktop);
+    byId("salesItemsBody").addEventListener("change", recalculateFromDesktop);
     byId("salesItemsBody").addEventListener("click", function (event) {
         var button = event.target.closest(".js-remove");
         if (!button) return;
@@ -1714,8 +2654,8 @@ $pageTitle='Sales';
         renderItems();
     });
 
-    byId("mobileItems").addEventListener("input", recalculateAll);
-    byId("mobileItems").addEventListener("change", recalculateAll);
+    byId("mobileItems").addEventListener("input", recalculateFromMobile);
+    byId("mobileItems").addEventListener("change", recalculateFromMobile);
     byId("mobileItems").addEventListener("click", function (event) {
         var button = event.target.closest(".js-mobile-remove");
         if (!button) return;

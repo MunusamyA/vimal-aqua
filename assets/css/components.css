@@ -2547,7 +2547,7 @@ label {
 .form-grid select,
 .form-grid textarea {
   width: 100%;
-  min-height: 40px;
+  min-height: 34px;
   padding: 8px 11px;
   color: var(--text-primary);
   background: var(--neutral-0);
@@ -7458,6 +7458,7 @@ table.dataTable td .action-button {
     border-radius: var(--radius-md);
     background: var(--surface);
     overflow: hidden;
+    margin-top: var(--space-3);
 }
 
 .app-side-card-head {

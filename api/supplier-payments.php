@@ -1047,6 +1047,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $dateFrom = trim((string)($_GET['date_from'] ?? ''));
     $dateTo = trim((string)($_GET['date_to'] ?? ''));
     $typeFilter = trim((string)($_GET['payment_type'] ?? ''));
+    $modeFilter = trim((string)($_GET['payment_mode'] ?? ''));
 
     $supplierId = 0;
     if (!empty($_GET['supplier_ref'])) {
@@ -1087,6 +1088,20 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':payment_type'] = (int)$typeFilter;
     }
 
+    if ($modeFilter !== '') {
+        $mode = (int)$modeFilter;
+        if (!in_array($mode, [1,2,3,4], true)) {
+            json_error('Invalid Payment Mode.', 422);
+        }
+        $where[] = 'EXISTS (
+            SELECT 1
+            FROM supplier_payment_details md
+            WHERE md.supplier_payment_id=sp.id
+              AND md.payment_mode=:payment_mode
+        )';
+        $params[':payment_mode'] = $mode;
+    }
+
     $from =
         ' FROM supplier_payments sp
           INNER JOIN suppliers s ON s.id=sp.supplier_id AND s.branch_id=sp.branch_id
@@ -1101,6 +1116,24 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $countStmt = db()->prepare('SELECT COUNT(*)' . $from . ' WHERE ' . implode(' AND ', $where));
     $countStmt->execute($params);
     $recordsFiltered = (int)$countStmt->fetchColumn();
+
+    $summarySql =
+        'SELECT COUNT(*) AS total_payments,
+                COALESCE(SUM(sp.amount),0) AS payment_amount,
+                COALESCE(SUM(sp.discount_amount),0) AS discount_amount,
+                COALESCE(SUM(sp.amount + sp.discount_amount),0) AS settled_amount' .
+        $from .
+        ' WHERE ' . implode(' AND ', $where);
+
+    $summaryStmt = db()->prepare($summarySql);
+    foreach ($params as $key => $value) {
+        $type = in_array($key, [':branch_id', ':supplier_id', ':payment_type', ':payment_mode'], true)
+            ? PDO::PARAM_INT
+            : PDO::PARAM_STR;
+        $summaryStmt->bindValue($key, $value, $type);
+    }
+    $summaryStmt->execute();
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $columns = [
         0 => 'sp.payment_no',
@@ -1137,7 +1170,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
 
     $stmt = db()->prepare($sql);
     foreach ($params as $key => $value) {
-        $type = in_array($key, [':branch_id', ':supplier_id', ':payment_type'], true)
+        $type = in_array($key, [':branch_id', ':supplier_id', ':payment_type', ':payment_mode'], true)
             ? PDO::PARAM_INT
             : PDO::PARAM_STR;
         $stmt->bindValue($key, $value, $type);
@@ -1194,6 +1227,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             'recordsTotal' => $recordsTotal,
             'recordsFiltered' => $recordsFiltered,
             'data' => $rows,
+        ],
+        'summary' => [
+            'total_payments' => (int)($summary['total_payments'] ?? 0),
+            'payment_amount' => (float)($summary['payment_amount'] ?? 0),
+            'discount_amount' => (float)($summary['discount_amount'] ?? 0),
+            'settled_amount' => (float)($summary['settled_amount'] ?? 0),
         ],
         'list_actions' => $access['actions'],
         'form_actions' => $access['actions'],

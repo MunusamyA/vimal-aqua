@@ -305,9 +305,15 @@ if ($method === 'GET') {
         $start = max(0, (int)($_GET['start'] ?? 0));
         $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
         $search = trim((string)($_GET['search']['value'] ?? ''));
+
         $statusFilter = null;
         if (isset($_GET['status']) && $_GET['status'] !== '') {
             $statusFilter = account_validate_status($_GET['status']);
+        }
+
+        $typeFilter = null;
+        if (isset($_GET['account_type']) && $_GET['account_type'] !== '') {
+            $typeFilter = account_validate_type($_GET['account_type']);
         }
 
         $baseWhere = ['branch_id = :branch_id'];
@@ -315,8 +321,18 @@ if ($method === 'GET') {
         $params = [':branch_id' => $branchId];
 
         if ($search !== '') {
-            $where[] = '(account_code LIKE :search OR account_name LIKE :search OR description LIKE :search)';
-            $params[':search'] = '%' . $search . '%';
+            $term = '%' . $search . '%';
+            $where[] = '(account_code LIKE :search_code
+                         OR account_name LIKE :search_name
+                         OR description LIKE :search_description)';
+            $params[':search_code'] = $term;
+            $params[':search_name'] = $term;
+            $params[':search_description'] = $term;
+        }
+
+        if ($typeFilter !== null) {
+            $where[] = 'account_type = :account_type';
+            $params[':account_type'] = $typeFilter;
         }
 
         if ($statusFilter !== null) {
@@ -336,7 +352,27 @@ if ($method === 'GET') {
         $filteredStmt->execute($params);
         $recordsFiltered = (int)$filteredStmt->fetchColumn();
 
-        $columns = ['account_code', 'account_name', 'account_type', 'opening_balance', 'description', 'status', 'id'];
+        $summaryStmt = db()->prepare(
+            'SELECT COUNT(*) AS total_accounts,
+                    COALESCE(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END),0) AS active_accounts,
+                    COALESCE(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END),0) AS inactive_accounts,
+                    COALESCE(SUM(opening_balance),0) AS opening_balance
+             FROM accounts
+             WHERE ' . implode(' AND ', $where)
+        );
+        $summaryStmt->execute($params);
+        $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+        $columns = [
+            0 => 'account_code',
+            1 => 'account_name',
+            2 => 'account_type',
+            3 => 'opening_balance',
+            4 => 'description',
+            5 => 'status',
+            6 => 'id',
+        ];
+
         $orderColumn = (int)($_GET['order'][0]['column'] ?? 0);
         $orderDir = strtolower((string)($_GET['order'][0]['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
         $orderBy = $columns[$orderColumn] ?? 'account_code';
@@ -349,7 +385,7 @@ if ($method === 'GET') {
 
         $stmt = db()->prepare($sql);
         foreach ($params as $key => $value) {
-            $isInt = $key === ':status' || $key === ':branch_id';
+            $isInt = in_array($key, [':status', ':branch_id', ':account_type'], true);
             $stmt->bindValue($key, $value, $isInt ? PDO::PARAM_INT : PDO::PARAM_STR);
         }
         $stmt->bindValue(':start', $start, PDO::PARAM_INT);
@@ -376,6 +412,12 @@ if ($method === 'GET') {
                 'recordsTotal' => $recordsTotal,
                 'recordsFiltered' => $recordsFiltered,
                 'data' => $rows,
+            ],
+            'summary' => [
+                'total_accounts' => (int)($summary['total_accounts'] ?? 0),
+                'active_accounts' => (int)($summary['active_accounts'] ?? 0),
+                'inactive_accounts' => (int)($summary['inactive_accounts'] ?? 0),
+                'opening_balance' => (float)($summary['opening_balance'] ?? 0),
             ],
             'allowed_actions' => $access['actions'],
             'action_codes' => [

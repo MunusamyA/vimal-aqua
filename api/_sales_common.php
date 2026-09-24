@@ -202,9 +202,64 @@ function aqua_product_bundle(int $branchId, int $productId, ?int $customerId=nul
     );
     $stmt->execute([':product_id'=>$productId, ':branch_id'=>$branchId]);
     $rows = $stmt->fetchAll();
-    if (!$rows) json_error('Selected Product is invalid, inactive or not allowed for Sale.',422);
+
+    if (!$rows) {
+        json_error('Selected Product is invalid, inactive or not allowed for Sale.',422);
+    }
 
     $first=$rows[0];
+    $dbPrimary=null;
+    $dbSecondary=null;
+
+    foreach($rows as $row){
+        $unit=[
+            'product_unit_id'=>(int)$row['product_unit_id'],
+            'source_unit_type'=>(int)$row['unit_type'],
+            'conversion_qty'=>max(1.0,(float)$row['conversion_qty']),
+            'unit_name'=>(string)$row['unit_name'],
+            'short_name'=>(string)$row['short_name'],
+        ];
+
+        if((int)$row['unit_type']===1 && $dbPrimary===null){
+            $dbPrimary=$unit;
+        } elseif((int)$row['unit_type']===2 && $dbSecondary===null){
+            $dbSecondary=$unit;
+        }
+    }
+
+    if($dbPrimary===null){
+        json_error('Selected Product has no active Primary Unit.',422);
+    }
+
+    /*
+     * FINAL SALES UNIT STANDARD
+     * -------------------------
+     * Display/transaction Primary Unit = larger/main unit
+     * Display/transaction Secondary Unit = smaller/base unit
+     *
+     * Old products may still be stored as:
+     *   Primary = PCS (conversion 1)
+     *   Secondary = Box (conversion 12)
+     *
+     * Do NOT alter historical master rows here. Instead normalize the unit
+     * orientation for Sales by comparing conversion quantities.
+     */
+    $primary=$dbPrimary;
+    $secondary=$dbSecondary;
+    $legacySwapped=0;
+
+    if(
+        $dbSecondary!==null &&
+        (float)$dbSecondary['conversion_qty'] > (float)$dbPrimary['conversion_qty']
+    ){
+        $primary=$dbSecondary;
+        $secondary=$dbPrimary;
+        $legacySwapped=1;
+    }
+
+    $primary['unit_type']=1;
+    if($secondary!==null) $secondary['unit_type']=2;
+
     $bundle=[
         'id'=>(int)$first['id'],
         'product_code'=>(string)$first['product_code'],
@@ -220,46 +275,109 @@ function aqua_product_bundle(int $branchId, int $productId, ?int $customerId=nul
         'igst_rate'=>(float)$first['igst_rate'],
         'cess_rate'=>(float)$first['cess_rate'],
         'tax_percentage'=>round((float)$first['gst_rate']+(float)$first['cess_rate'],2),
-        'primary_unit'=>null,
-        'secondary_unit'=>null,
+        'primary_unit'=>$primary,
+        'secondary_unit'=>$secondary,
         'primary_price'=>0.0,
+        'secondary_price'=>0.0,
+        'legacy_unit_swapped'=>$legacySwapped,
+        'db_primary_unit_id'=>(int)$dbPrimary['product_unit_id'],
+        'db_secondary_unit_id'=>$dbSecondary===null?null:(int)$dbSecondary['product_unit_id'],
     ];
-
-    foreach($rows as $row){
-        $unit=[
-            'product_unit_id'=>(int)$row['product_unit_id'],
-            'unit_type'=>(int)$row['unit_type'],
-            'conversion_qty'=>max(1.0,(float)$row['conversion_qty']),
-            'unit_name'=>(string)$row['unit_name'],
-            'short_name'=>(string)$row['short_name'],
-        ];
-        if((int)$row['unit_type']===1 && $bundle['primary_unit']===null) $bundle['primary_unit']=$unit;
-        elseif((int)$row['unit_type']===2 && $bundle['secondary_unit']===null) $bundle['secondary_unit']=$unit;
-    }
-    if($bundle['primary_unit']===null) json_error('Selected Product has no active Primary Unit.',422);
 
     if($customerId !== null && $customerId > 0){
         $customer=aqua_customer($branchId,$customerId);
         $primaryUnitId=(int)$bundle['primary_unit']['product_unit_id'];
+
+        // 1) Customer-specific Main/Primary Unit price.
         $priceStmt=db()->prepare(
             'SELECT cpp.selling_price
              FROM customer_product_prices cpp
-             WHERE cpp.customer_id=:customer_id AND cpp.product_unit_id=:product_unit_id AND cpp.status=1
+             WHERE cpp.customer_id=:customer_id
+               AND cpp.product_unit_id=:product_unit_id
+               AND cpp.status=1
              LIMIT 1'
         );
-        $priceStmt->execute([':customer_id'=>$customerId, ':product_unit_id'=>$primaryUnitId]);
+        $priceStmt->execute([
+            ':customer_id'=>$customerId,
+            ':product_unit_id'=>$primaryUnitId
+        ]);
         $price=$priceStmt->fetchColumn();
+
+        // 2) Price-level Main/Primary Unit price.
         if($price===false){
             $priceStmt=db()->prepare(
                 'SELECT pp.selling_price
                  FROM product_prices pp
-                 WHERE pp.product_unit_id=:product_unit_id AND pp.price_level_id=:price_level_id AND pp.status=1
+                 WHERE pp.product_unit_id=:product_unit_id
+                   AND pp.price_level_id=:price_level_id
+                   AND pp.status=1
                  LIMIT 1'
             );
-            $priceStmt->execute([':product_unit_id'=>$primaryUnitId, ':price_level_id'=>(int)$customer['price_level_id']]);
+            $priceStmt->execute([
+                ':product_unit_id'=>$primaryUnitId,
+                ':price_level_id'=>(int)$customer['price_level_id']
+            ]);
             $price=$priceStmt->fetchColumn();
         }
-        $bundle['primary_price']=$price===false?0.0:(float)$price;
+
+        /*
+         * 3) Safe fallback:
+         * If only the smaller/base-unit price exists, derive Main Unit price
+         * using the conversion ratio.
+         */
+        if($price===false && $bundle['secondary_unit']!==null){
+            $secondaryUnitId=(int)$bundle['secondary_unit']['product_unit_id'];
+
+            $priceStmt=db()->prepare(
+                'SELECT cpp.selling_price
+                 FROM customer_product_prices cpp
+                 WHERE cpp.customer_id=:customer_id
+                   AND cpp.product_unit_id=:product_unit_id
+                   AND cpp.status=1
+                 LIMIT 1'
+            );
+            $priceStmt->execute([
+                ':customer_id'=>$customerId,
+                ':product_unit_id'=>$secondaryUnitId
+            ]);
+            $secondaryPrice=$priceStmt->fetchColumn();
+
+            if($secondaryPrice===false){
+                $priceStmt=db()->prepare(
+                    'SELECT pp.selling_price
+                     FROM product_prices pp
+                     WHERE pp.product_unit_id=:product_unit_id
+                       AND pp.price_level_id=:price_level_id
+                       AND pp.status=1
+                     LIMIT 1'
+                );
+                $priceStmt->execute([
+                    ':product_unit_id'=>$secondaryUnitId,
+                    ':price_level_id'=>(int)$customer['price_level_id']
+                ]);
+                $secondaryPrice=$priceStmt->fetchColumn();
+            }
+
+            if($secondaryPrice!==false){
+                $price=round(
+                    (float)$secondaryPrice *
+                    (float)$bundle['primary_unit']['conversion_qty'] /
+                    max(1.0,(float)$bundle['secondary_unit']['conversion_qty']),
+                    2
+                );
+            }
+        }
+
+        $bundle['primary_price']=$price===false?0.0:round((float)$price,2);
+
+        if($bundle['secondary_unit']!==null && $bundle['primary_price']>0){
+            $bundle['secondary_price']=round(
+                $bundle['primary_price'] *
+                (float)$bundle['secondary_unit']['conversion_qty'] /
+                max(1.0,(float)$bundle['primary_unit']['conversion_qty']),
+                2
+            );
+        }
     }
 
     return $bundle;
@@ -356,18 +474,66 @@ function aqua_can_stock(int $branchId, int $locationType, ?int $vehicleId, int $
 
 function aqua_customer_can_balance(int $branchId, int $customerId, int $productId): float
 {
-    $customer=aqua_customer($branchId,$customerId,false);
-    $opening=(float)$customer['opening_can_balance'];
+    /*
+     * Product-wise returnable balance comes only from can_movements.
+     *
+     * New Customer Opening Stock is already inserted as:
+     *   movement_type = 5
+     *   remarks = Opening Customer Stock
+     *
+     * Therefore customers.opening_can_balance MUST NOT be added to each
+     * individual product, otherwise the total opening quantity is duplicated
+     * across every reusable product.
+     */
     $stmt=db()->prepare(
         'SELECT COALESCE(SUM(CASE
              WHEN movement_type IN (1,5) THEN qty
              WHEN movement_type IN (2,3,4,6) THEN -qty
              ELSE 0 END),0)
          FROM can_movements
-         WHERE branch_id=:branch_id AND customer_id=:customer_id AND product_id=:product_id'
+         WHERE branch_id=:branch_id
+           AND customer_id=:customer_id
+           AND product_id=:product_id'
     );
-    $stmt->execute([':branch_id'=>$branchId, ':customer_id'=>$customerId, ':product_id'=>$productId]);
-    return round($opening+(float)$stmt->fetchColumn(),3);
+
+    $stmt->execute([
+        ':branch_id'=>$branchId,
+        ':customer_id'=>$customerId,
+        ':product_id'=>$productId,
+    ]);
+
+    return round((float)$stmt->fetchColumn(),3);
+}
+
+function aqua_customer_legacy_opening_can_balance(int $branchId, int $customerId): float
+{
+    $customer=aqua_customer($branchId,$customerId,false);
+    $opening=(float)$customer['opening_can_balance'];
+
+    if($opening<=0.0005) return 0.0;
+
+    /*
+     * If product-wise opening movements exist, opening_can_balance is only
+     * the backward-compatible total snapshot and must not be counted again.
+     */
+    $stmt=db()->prepare(
+        "SELECT 1
+         FROM can_movements
+         WHERE branch_id=:branch_id
+           AND customer_id=:customer_id
+           AND movement_type=5
+           AND sale_id IS NULL
+           AND line_run_id IS NULL
+           AND remarks='Opening Customer Stock'
+         LIMIT 1"
+    );
+
+    $stmt->execute([
+        ':branch_id'=>$branchId,
+        ':customer_id'=>$customerId,
+    ]);
+
+    return $stmt->fetchColumn() ? 0.0 : round($opening,3);
 }
 
 function aqua_customer_outstanding(int $branchId, int $customerId): float
@@ -523,7 +689,20 @@ function aqua_calculate_sale_items(
             json_error('You do not have permission to apply Discount.',403);
         }
 
-        $gross=round($primaryQty*$rate + $secondaryQty*($rate*$secondaryConv),2);
+        /*
+         * Unit-aware rate calculation:
+         * Secondary Rate =
+         * Primary Rate x Secondary Conversion / Primary Conversion
+         */
+        $secondaryRate=$product['secondary_unit']
+            ? round($rate*$secondaryConv/$primaryConv,2)
+            : 0.0;
+
+        $gross=round(
+            $primaryQty*$rate +
+            $secondaryQty*$secondaryRate,
+            2
+        );
         $discount=0.0;
         if($discountType===2) $discount=round($gross*min(100,$discountValue)/100,2);
         elseif($discountType===3) $discount=min($gross,round($discountValue,2));
@@ -546,7 +725,9 @@ function aqua_calculate_sale_items(
             'primary_qty'=>$primaryQty,'secondary_qty'=>$secondaryQty,
             'conversion_qty'=>$primaryConv,'secondary_conversion_qty'=>$secondaryConv,
             'qty'=>$primaryQty,'base_qty'=>$baseQty,
-            'rate'=>$rate,'gross_amount'=>$gross,
+            'rate'=>$rate,
+            'secondary_rate'=>$secondaryRate,
+            'gross_amount'=>$gross,
             'discount_type'=>$discountType,'discount_value'=>$discountValue,'discount_amount'=>$discount,
             'after_item_discount'=>$afterItem,'overall_discount_amount'=>0.0,
             'tax_type'=>(int)$product['gst_type'],'tax_percentage'=>$taxMode===1?(float)$product['tax_percentage']:0.0,

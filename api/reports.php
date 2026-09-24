@@ -103,10 +103,15 @@ function report_ref_id($value, string $purpose, string $label): int
 
 function report_dt(): array
 {
+    $requestedLength = (int)($_GET['length'] ?? 25);
+    // DataTables export helpers commonly request length=-1 for "all rows".
+    // Treat that as a safe large export instead of clamping it to one row.
+    $length = $requestedLength < 0 ? 100000 : max(1, min(100000, $requestedLength));
+
     return [
         'draw' => max(0, (int)($_GET['draw'] ?? 0)),
         'start' => max(0, (int)($_GET['start'] ?? 0)),
-        'length' => max(1, min(100000, (int)($_GET['length'] ?? 25))),
+        'length' => $length,
         'search' => trim((string)($_GET['search']['value'] ?? '')),
         'order_index' => max(0, (int)($_GET['order'][0]['column'] ?? 0)),
         'order_dir' => strtolower((string)($_GET['order'][0]['dir'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC',
@@ -383,8 +388,26 @@ function report_productwise(int $branchId, array $actions): void
     $dt = report_dt();
     [$dateFrom, $dateTo] = report_date_range();
 
-    $where = ['s.branch_id=:branch_id', 's.status=2', 's.document_type=2'];
+    $where = ['s.branch_id=:branch_id', 's.status=2'];
     $params = [':branch_id' => $branchId];
+
+    /*
+     * Product-wise sales should not be restricted only to document_type=2.
+     * By default include posted Sales Invoices (2) and Customer Orders (3).
+     * Quotations (1) are excluded because they are not completed sales.
+     * A specific document can be selected from the Product-wise report filter.
+     */
+    $documentRaw = trim((string)($_GET['document_type'] ?? ''));
+    if ($documentRaw !== '') {
+        $documentType = (int)$documentRaw;
+        if (!in_array($documentType, [2,3], true)) {
+            json_error('Invalid Document Type.', 422);
+        }
+        $where[] = 's.document_type=:document_type';
+        $params[':document_type'] = $documentType;
+    } else {
+        $where[] = 's.document_type IN (2,3)';
+    }
 
     if ($dt['search'] !== '') {
         $like = '%' . $dt['search'] . '%';
@@ -456,10 +479,21 @@ function report_productwise(int $branchId, array $actions): void
     $summaryStmt->execute();
     $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
+    /* Match the frontend table exactly:
+       0 Code, 1 Product, 2 Category, 3 HSN, 4 Documents, 5 Qty,
+       6 Gross, 7 Discount, 8 Taxable, 9 GST, 10 Net Sales. */
     $columns = [
-        0 => 'p.product_code', 1 => 'p.product_name', 2 => 'c.category_name', 3 => 'invoice_count',
-        4 => 'total_qty', 5 => 'gross_amount', 6 => 'discount_amount', 7 => 'taxable_value',
-        8 => 'tax_amount', 9 => 'net_sales',
+        0 => 'p.product_code',
+        1 => 'p.product_name',
+        2 => 'c.category_name',
+        3 => 'h.hsn_code',
+        4 => 'invoice_count',
+        5 => 'total_qty',
+        6 => 'gross_amount',
+        7 => 'discount_amount',
+        8 => 'taxable_value',
+        9 => 'tax_amount',
+        10 => 'net_sales',
     ];
     $orderColumn = $columns[$dt['order_index']] ?? 'p.product_name';
 
@@ -526,7 +560,7 @@ function report_gst_subqueries(int $branchId, string $type, ?string $dateFrom, ?
     $queries = [];
 
     if ($type === 'sales' || $type === 'both') {
-        $where = ['s.branch_id=:gst_sales_branch', 's.status=2', 's.document_type=2', 's.tax_mode=1'];
+        $where = ['s.branch_id=:gst_sales_branch', 's.status=2', 's.document_type IN (2,3)', 's.tax_mode=1'];
         $params[':gst_sales_branch'] = $branchId;
 
         if ($dateFrom !== null) {
@@ -758,9 +792,17 @@ function report_daily_ledger(int $branchId, array $actions): void
     $moneyOut = (float)($flow['money_out'] ?? 0);
     $closing = round($opening + $moneyIn - $moneyOut, 2);
 
+    // Match Daily Ledger frontend columns exactly.
     $columns = [
-        0 => 'atx.transaction_date', 1 => 'a.account_name', 2 => 'atx.source_type', 3 => 'atx.source_id',
-        4 => 'atx.remarks', 5 => 'money_in', 6 => 'money_out', 7 => 'atx.id',
+        0 => 'atx.transaction_date',
+        1 => 'a.account_name',
+        2 => 'a.account_type',
+        3 => 'atx.source_type',
+        4 => 'atx.source_id',
+        5 => 'atx.remarks',
+        6 => 'CASE WHEN atx.transaction_type=1 THEN atx.amount ELSE 0 END',
+        7 => 'CASE WHEN atx.transaction_type=2 THEN atx.amount ELSE 0 END',
+        8 => 'day_running',
     ];
     $orderColumn = $columns[$dt['order_index']] ?? 'atx.transaction_date';
 
@@ -904,9 +946,15 @@ function report_account_ledger(int $branchId, array $actions): void
     $moneyOut = (float)($flow['money_out'] ?? 0);
     $closing = round($opening + $moneyIn - $moneyOut, 2);
 
+    // Match Account Ledger frontend columns exactly.
     $columns = [
-        0 => 'atx.transaction_date', 1 => 'atx.source_type', 2 => 'atx.source_id', 3 => 'atx.remarks',
-        4 => 'money_in', 5 => 'money_out', 6 => 'atx.id',
+        0 => 'atx.transaction_date',
+        1 => 'atx.source_type',
+        2 => 'atx.source_id',
+        3 => 'atx.remarks',
+        4 => 'CASE WHEN atx.transaction_type=1 THEN atx.amount ELSE 0 END',
+        5 => 'CASE WHEN atx.transaction_type=2 THEN atx.amount ELSE 0 END',
+        6 => 'period_running',
     ];
     $orderColumn = $columns[$dt['order_index']] ?? 'atx.transaction_date';
 
@@ -1065,10 +1113,22 @@ function report_stock(int $branchId, array $actions): void
     $summaryStmt->execute();
     $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
+    // Match Stock Details frontend columns exactly, including Unit at index 4.
     $columns = [
-        0 => 'p.product_code', 1 => 'p.product_name', 2 => 'c.category_name', 3 => 'p.product_type',
-        4 => 'opening_qty', 5 => 'stock_in', 6 => 'stock_out', 7 => 'closing_qty',
-        8 => 'purchase_in', 9 => 'production_in', 10 => 'sale_out', 11 => 'p.purchase_price', 12 => 'stock_value',
+        0 => 'p.product_code',
+        1 => 'p.product_name',
+        2 => 'c.category_name',
+        3 => 'p.product_type',
+        4 => "COALESCE(u.short_name,u.unit_name,'')",
+        5 => 'opening_qty',
+        6 => 'stock_in',
+        7 => 'stock_out',
+        8 => 'closing_qty',
+        9 => 'purchase_in',
+        10 => 'production_in',
+        11 => 'sale_out',
+        12 => 'p.purchase_price',
+        13 => 'stock_value',
     ];
     $orderColumn = $columns[$dt['order_index']] ?? 'p.product_name';
 

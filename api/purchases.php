@@ -459,9 +459,25 @@ function purchase_calculate(array $data, int $branchId): array
         $primaryRate=purchase_decimal($item['primary_rate']??0,'items','Primary Rate',2,false);
         $discountType=purchase_enum($item['discount_type']??1,'items','Discount Type',[1,2,3]);
         $discountValue=purchase_decimal($item['discount_value']??0,'items','Discount',2,false);
+        /*
+         * Unit model:
+         *   Primary Unit   = larger/main unit (example: Box)
+         *   Secondary Unit = smaller/base unit (example: Piece)
+         *
+         * Both Product Unit conversion quantities are stored against the same
+         * stock base. Example: Box=12, Piece=1.
+         *
+         * Therefore:
+         *   Secondary Rate = Primary Rate x Secondary Conversion / Primary Conversion
+         *
+         * This also remains backward-compatible with legacy products where
+         * Primary=Piece (1) and Secondary=Box (12).
+         */
         $primaryConversion=max(1,(float)$source['primary']['conversion_qty']);
         $secondaryConversion=$source['secondary']!==null?max(1,(float)$source['secondary']['conversion_qty']):0.0;
-        $secondaryRate=$source['secondary']!==null?round($primaryRate*$secondaryConversion,2):0.0;
+        $secondaryRate=$source['secondary']!==null
+            ? round($primaryRate*$secondaryConversion/$primaryConversion,2)
+            : 0.0;
 
         $unitRows=[];
         $primaryGross=round($primaryQty*$primaryRate,2);
@@ -830,6 +846,14 @@ function purchase_items(int $purchaseId): array
                 pi.qty,
                 pi.free_qty,
                 pi.conversion_qty,
+                COALESCE((
+                    SELECT pu_primary.conversion_qty
+                    FROM product_units pu_primary
+                    WHERE pu_primary.product_id = pu.product_id
+                      AND pu_primary.unit_type = 1
+                    ORDER BY pu_primary.id ASC
+                    LIMIT 1
+                ), 1) AS primary_conversion_qty,
                 pi.base_qty,
                 pi.free_base_qty,
                 pi.rate,
@@ -854,7 +878,7 @@ function purchase_items(int $purchaseId): array
     $rows=$stmt->fetchAll();
     foreach($rows as &$row){
         foreach(['id','product_id','unit_type','product_unit_id','gst_type','discount_type'] as $key) $row[$key]=(int)$row[$key];
-        foreach(['qty','free_qty','conversion_qty','base_qty','free_base_qty','rate','gross_amount','discount_value','discount_amount','overall_discount_amount','tax_percentage','tax_amount','other_charge_amount','net_amount'] as $key) $row[$key]=(float)$row[$key];
+        foreach(['qty','free_qty','conversion_qty','primary_conversion_qty','base_qty','free_base_qty','rate','gross_amount','discount_value','discount_amount','overall_discount_amount','tax_percentage','tax_amount','other_charge_amount','net_amount'] as $key) $row[$key]=(float)$row[$key];
     }
     unset($row);
     return $rows;
@@ -889,8 +913,18 @@ function purchase_grouped_items(int $purchaseId): array
         } elseif((int)$row['unit_type']===2){
             $grouped[$productId]['secondary_qty']=(float)$row['qty'];
             $grouped[$productId]['free_secondary_qty']=(float)$row['free_qty'];
+
+            /*
+             * Secondary Rate = Primary Rate x Secondary Conv / Primary Conv.
+             * Reverse the formula when a draft contains only Secondary Qty.
+             */
             if($grouped[$productId]['primary_rate']<=0 && (float)$row['conversion_qty']>0){
-                $grouped[$productId]['primary_rate']=round((float)$row['rate']/(float)$row['conversion_qty'],2);
+                $primaryConv=max(1,(float)($row['primary_conversion_qty']??1));
+                $secondaryConv=max(1,(float)$row['conversion_qty']);
+                $grouped[$productId]['primary_rate']=round(
+                    (float)$row['rate']*$primaryConv/$secondaryConv,
+                    2
+                );
             }
         }
     }
@@ -1573,6 +1607,13 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
     $search = trim((string)($_GET['search']['value'] ?? ''));
     $statusFilter = (string)($_GET['status'] ?? '');
+    $supplierFilter = trim((string)($_GET['supplier_id'] ?? ''));
+    $dateFrom = purchase_optional_date($_GET['date_from'] ?? null, 'date_from', 'From Date');
+    $dateTo = purchase_optional_date($_GET['date_to'] ?? null, 'date_to', 'To Date');
+
+    if ($dateFrom !== null && $dateTo !== null && $dateFrom > $dateTo) {
+        json_error('From Date cannot be after To Date.', 422);
+    }
 
     $baseWhere = ['p.branch_id = :branch_id'];
     $where = $baseWhere;
@@ -1597,6 +1638,22 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
         $params[':status'] = $status;
     }
 
+    if ($supplierFilter !== '') {
+        $supplierId = positive_id($supplierFilter, 'supplier_id');
+        $where[] = 'p.supplier_id = :supplier_id';
+        $params[':supplier_id'] = $supplierId;
+    }
+
+    if ($dateFrom !== null) {
+        $where[] = 'p.purchase_date >= :date_from';
+        $params[':date_from'] = $dateFrom;
+    }
+
+    if ($dateTo !== null) {
+        $where[] = 'p.purchase_date <= :date_to';
+        $params[':date_to'] = $dateTo;
+    }
+
     $baseFrom = ' FROM purchases p INNER JOIN suppliers s ON s.id = p.supplier_id';
 
     $totalStmt = db()->prepare('SELECT COUNT(*)' . $baseFrom . ' WHERE ' . implode(' AND ', $baseWhere));
@@ -1606,6 +1663,36 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $filteredStmt = db()->prepare('SELECT COUNT(*)' . $baseFrom . ' WHERE ' . implode(' AND ', $where));
     $filteredStmt->execute($params);
     $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+    $paidExpr = 'COALESCE(
+        (
+            SELECT SUM(a.amount)
+            FROM supplier_payment_allocations a
+            INNER JOIN supplier_payments sp
+               ON sp.id = a.supplier_payment_id
+              AND sp.status = 1
+            WHERE a.purchase_id = p.id
+        ),
+        0
+    )';
+
+    $summarySql =
+        'SELECT COUNT(*) AS total_purchases,
+                COALESCE(SUM(p.grand_total),0) AS grand_total,
+                COALESCE(SUM(' . $paidExpr . '),0) AS paid_amount,
+                COALESCE(SUM(GREATEST(p.grand_total - (' . $paidExpr . '),0)),0) AS balance_amount' .
+        $baseFrom .
+        ' WHERE ' . implode(' AND ', $where);
+
+    $summaryStmt = db()->prepare($summarySql);
+    foreach ($params as $key => $value) {
+        $type = in_array($key, [':branch_id', ':status', ':supplier_id'], true)
+            ? PDO::PARAM_INT
+            : PDO::PARAM_STR;
+        $summaryStmt->bindValue($key, $value, $type);
+    }
+    $summaryStmt->execute();
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $columns = [
         0 => 'p.purchase_no',
@@ -1650,7 +1737,7 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
     $stmt = db()->prepare($sql);
 
     foreach ($params as $key => $value) {
-        $type = ($key === ':branch_id' || $key === ':status') ? PDO::PARAM_INT : PDO::PARAM_STR;
+        $type = in_array($key, [':branch_id', ':status', ':supplier_id'], true) ? PDO::PARAM_INT : PDO::PARAM_STR;
         $stmt->bindValue($key, $value, $type);
     }
 
@@ -1682,6 +1769,12 @@ if ($method === 'GET' && isset($_GET['datatable'])) {
             'recordsTotal' => $recordsTotal,
             'recordsFiltered' => $recordsFiltered,
             'data' => $rows,
+        ],
+        'summary' => [
+            'total_purchases' => (int)($summary['total_purchases'] ?? 0),
+            'grand_total' => (float)($summary['grand_total'] ?? 0),
+            'paid_amount' => (float)($summary['paid_amount'] ?? 0),
+            'balance_amount' => (float)($summary['balance_amount'] ?? 0),
         ],
         'allowed_actions' => $access['actions'],
     ]);

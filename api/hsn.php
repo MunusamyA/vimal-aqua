@@ -161,7 +161,17 @@ if ($method === 'GET') {
     $branchId = (int)$context['branch_id'];
 
     if (isset($_GET['options'])) {
+        $rateStmt = db()->prepare(
+            'SELECT DISTINCT gst_rate
+             FROM hsn_master
+             WHERE branch_id=:branch_id
+             ORDER BY gst_rate'
+        );
+        $rateStmt->execute([':branch_id' => $branchId]);
+        $gstRates = array_map('floatval', $rateStmt->fetchAll(PDO::FETCH_COLUMN));
+
         json_success('HSN form options loaded.', [
+            'gst_rates' => $gstRates,
             'allowed_actions' => $access['actions'],
         ]);
     }
@@ -179,6 +189,7 @@ if ($method === 'GET') {
         $length = max(1, min(100000, (int)($_GET['length'] ?? 10)));
         $search = trim((string)($_GET['search']['value'] ?? ''));
         $statusFilter = (string)($_GET['status'] ?? '');
+        $gstRateFilter = trim((string)($_GET['gst_rate'] ?? ''));
 
         $baseWhere = ['branch_id = :branch_id'];
         $where = $baseWhere;
@@ -196,6 +207,11 @@ if ($method === 'GET') {
             $params[':status'] = hsn_status($statusFilter);
         }
 
+        if ($gstRateFilter !== '') {
+            $where[] = 'gst_rate = :gst_rate';
+            $params[':gst_rate'] = hsn_rate($gstRateFilter, 'gst_rate', 'GST %');
+        }
+
         $totalStmt = db()->prepare(
             'SELECT COUNT(*) FROM hsn_master WHERE ' . implode(' AND ', $baseWhere)
         );
@@ -207,6 +223,16 @@ if ($method === 'GET') {
         );
         $filteredStmt->execute($params);
         $recordsFiltered = (int)$filteredStmt->fetchColumn();
+
+        $allSummaryStmt = db()->prepare(
+            'SELECT COUNT(*) AS total_count,
+                    COALESCE(SUM(CASE WHEN status=1 THEN 1 ELSE 0 END),0) AS active_count,
+                    COALESCE(SUM(CASE WHEN status=2 THEN 1 ELSE 0 END),0) AS inactive_count
+             FROM hsn_master
+             WHERE branch_id=:branch_id'
+        );
+        $allSummaryStmt->execute([':branch_id' => $branchId]);
+        $allSummary = $allSummaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
         $columns = [
             0 => 'hsn_code',
@@ -257,6 +283,12 @@ if ($method === 'GET') {
                 'recordsTotal' => $recordsTotal,
                 'recordsFiltered' => $recordsFiltered,
                 'data' => $rows,
+            ],
+            'summary' => [
+                'total_count' => (int)($allSummary['total_count'] ?? 0),
+                'active_count' => (int)($allSummary['active_count'] ?? 0),
+                'inactive_count' => (int)($allSummary['inactive_count'] ?? 0),
+                'matching_count' => $recordsFiltered,
             ],
             'allowed_actions' => $access['actions'],
         ]);

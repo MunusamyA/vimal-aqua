@@ -71,16 +71,42 @@ $headScripts = [
     </div>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card">
+        <div class="kpi-icon blue"><i data-lucide="shopping-cart"></i></div>
+        <div><div class="kpi-label">Purchases</div><div class="kpi-value" id="kpiPurchases">0</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon teal"><i data-lucide="indian-rupee"></i></div>
+        <div><div class="kpi-label">Grand Total</div><div class="kpi-value" id="kpiGrandTotal">₹0.00</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon green"><i data-lucide="badge-check"></i></div>
+        <div><div class="kpi-label">Paid</div><div class="kpi-value" id="kpiPaid">₹0.00</div></div>
+    </div>
+    <div class="card kpi-card">
+        <div class="kpi-icon orange"><i data-lucide="circle-dollar-sign"></i></div>
+        <div><div class="kpi-label">Balance</div><div class="kpi-value" id="kpiBalance">₹0.00</div></div>
+    </div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
-            <div class="field col-8">
+            <div class="field col-3">
                 <label for="masterSearch">Search</label>
                 <input class="input" id="masterSearch" type="text" autocomplete="off"
-                       placeholder="Search purchase no, supplier or invoice...">
+                       placeholder="Purchase no, supplier, invoice...">
             </div>
 
-            <div class="field col-4">
+            <div class="field col-3">
+                <label for="supplierFilter">Supplier</label>
+                <select class="select" id="supplierFilter">
+                    <option value="">All Suppliers</option>
+                </select>
+            </div>
+
+            <div class="field col-2">
                 <label for="statusFilter">Status</label>
                 <select class="select" id="statusFilter">
                     <option value="">All</option>
@@ -88,6 +114,16 @@ $headScripts = [
                     <option value="2">Posted</option>
                     <option value="3">Cancelled</option>
                 </select>
+            </div>
+
+            <div class="field col-2">
+                <label for="dateFrom">From Date</label>
+                <input class="input" id="dateFrom" type="date">
+            </div>
+
+            <div class="field col-2">
+                <label for="dateTo">To Date</label>
+                <input class="input" id="dateTo" type="date">
             </div>
         </div>
     </div>
@@ -119,13 +155,37 @@ $headScripts = [
     var actions = [];
     var searchTimer = null;
     var masterSearch = document.getElementById("masterSearch");
+    var supplierFilter = document.getElementById("supplierFilter");
     var statusFilter = document.getElementById("statusFilter");
+    var dateFrom = document.getElementById("dateFrom");
+    var dateTo = document.getElementById("dateTo");
     var addButton = document.getElementById("addButton");
     var has = AppDataTable.has;
 
     var ACTION_CREATE = 2;
     var ACTION_UPDATE = 3;
     var ACTION_CANCEL = 14;
+
+    function setSummary(summary) {
+        summary = summary || {};
+        document.getElementById("kpiPurchases").textContent = Number(summary.total_purchases || 0).toLocaleString("en-IN");
+        document.getElementById("kpiGrandTotal").textContent = money(summary.grand_total || 0);
+        document.getElementById("kpiPaid").textContent = money(summary.paid_amount || 0);
+        document.getElementById("kpiBalance").textContent = money(summary.balance_amount || 0);
+    }
+
+    function loadFilterOptions() {
+        App.api("api/purchases.php?options=1").then(function(result){
+            var suppliers = (result.data && result.data.suppliers) || [];
+            supplierFilter.innerHTML = '<option value="">All Suppliers</option>';
+            suppliers.forEach(function(row){
+                var option = document.createElement("option");
+                option.value = String(row.id);
+                option.textContent = row.supplier_code + " - " + row.supplier_name;
+                supplierFilter.appendChild(option);
+            });
+        }).catch(function(){});
+    }
 
     function escapeHtml(value) {
         return String(value === null || value === undefined ? "" : value)
@@ -165,7 +225,7 @@ $headScripts = [
         serverSide:true,
         searching:true,
         searchDelay:350,
-        appSearchPlaceholder:"Search Purchases...",
+        appSearch:false,
         appLoaderText:"Loading purchases...",
         pageLength:10,
         lengthMenu:[[10,25,50,100],[10,25,50,100]],
@@ -187,9 +247,10 @@ $headScripts = [
             params.set("length",data.length);
             params.set("search[value]",data.search.value || "");
 
-            if (statusFilter.value !== "") {
-                params.set("status",statusFilter.value);
-            }
+            if (supplierFilter.value !== "") params.set("supplier_id",supplierFilter.value);
+            if (statusFilter.value !== "") params.set("status",statusFilter.value);
+            if (dateFrom.value !== "") params.set("date_from",dateFrom.value);
+            if (dateTo.value !== "") params.set("date_to",dateTo.value);
 
             if (data.order && data.order[0]) {
                 params.set("order[0][column]",data.order[0].column);
@@ -199,10 +260,12 @@ $headScripts = [
             App.api("api/purchases.php?" + params.toString()).then(function(result) {
                 actions = (result.data.allowed_actions || []).map(Number);
                 addButton.hidden = !has(actions,ACTION_CREATE);
+                setSummary(result.data.summary);
                 AppDataTable.applyExportPermissions(table,actions);
                 callback(result.data.datatable);
             }).catch(function(error) {
                 addButton.hidden = true;
+                setSummary({});
                 App.showError(error,"Unable to load purchases.");
                 callback({draw:data.draw,recordsTotal:0,recordsFiltered:0,data:[]});
             });
@@ -276,9 +339,13 @@ $headScripts = [
         },350);
     });
 
-    statusFilter.addEventListener("change",function(){
-        table.ajax.reload(null,true);
+    [supplierFilter,statusFilter,dateFrom,dateTo].forEach(function(filter){
+        filter.addEventListener("change",function(){
+            table.ajax.reload(null,true);
+        });
     });
+
+    loadFilterOptions();
 
     document.addEventListener("click",function(event){
         var button=event.target.closest(".js-cancel");

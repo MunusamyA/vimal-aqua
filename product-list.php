@@ -60,14 +60,44 @@ $headScripts = [
     </a>
 </div>
 
+<div class="kpi-grid">
+    <div class="card kpi-card"><div class="kpi-icon blue"><i data-lucide="package"></i></div><div><div class="kpi-label">Total Products</div><div class="kpi-value" id="kpiTotal">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon green"><i data-lucide="circle-check-big"></i></div><div><div class="kpi-label">Active Products</div><div class="kpi-value" id="kpiActive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon orange"><i data-lucide="circle-off"></i></div><div><div class="kpi-label">Inactive Products</div><div class="kpi-value" id="kpiInactive">0</div></div></div>
+    <div class="card kpi-card"><div class="kpi-icon teal"><i data-lucide="shopping-cart"></i></div><div><div class="kpi-label">Sale Allowed</div><div class="kpi-value" id="kpiSaleAllowed">0</div></div></div>
+</div>
+
 <div class="card table-card">
     <div class="card-header">
         <div class="form-row">
-            <div class="field col-8">
+            <div class="field col-3">
                 <label for="masterSearch">Search</label>
-                <input id="masterSearch" type="text" autocomplete="off" placeholder="Search products...">
+                <input id="masterSearch" type="text" autocomplete="off" placeholder="Code, product, HSN...">
             </div>
-            <div class="field col-4">
+            <div class="field col-3">
+                <label for="categoryFilter">Category</label>
+                <select id="categoryFilter">
+                    <option value="">All Categories</option>
+                </select>
+            </div>
+            <div class="field col-2">
+                <label for="typeFilter">Product Type</label>
+                <select id="typeFilter">
+                    <option value="">All Types</option>
+                    <option value="1">Raw Material</option>
+                    <option value="2">Finished Product</option>
+                    <option value="3">Consumable</option>
+                </select>
+            </div>
+            <div class="field col-2">
+                <label for="saleFilter">Sales</label>
+                <select id="saleFilter">
+                    <option value="">All</option>
+                    <option value="1">Allowed</option>
+                    <option value="0">Not Allowed</option>
+                </select>
+            </div>
+            <div class="field col-2">
                 <label for="statusFilter">Status</label>
                 <select id="statusFilter">
                     <option value="">All</option>
@@ -105,10 +135,51 @@ $headScripts = [
     var allowedActions=[];
     var searchTimer=null;
     var masterSearch=document.getElementById("masterSearch");
+    var categoryFilter=document.getElementById("categoryFilter");
+    var typeFilter=document.getElementById("typeFilter");
+    var saleFilter=document.getElementById("saleFilter");
     var statusFilter=document.getElementById("statusFilter");
     var addButton=document.getElementById("addButton");
     var has=AppDataTable.has;
     var ACTION_CREATE=2,ACTION_UPDATE=3,ACTION_ACTIVATE=27,ACTION_DEACTIVATE=28;
+
+
+    function setStats(rows){
+        rows=rows||[];
+        var active=0,inactive=0,saleAllowed=0;
+        rows.forEach(function(row){
+            if(Number(row.status)===1) active++; else inactive++;
+            if(Number(row.sale_allowed)===1) saleAllowed++;
+        });
+        document.getElementById("kpiTotal").textContent=rows.length.toLocaleString("en-IN");
+        document.getElementById("kpiActive").textContent=active.toLocaleString("en-IN");
+        document.getElementById("kpiInactive").textContent=inactive.toLocaleString("en-IN");
+        document.getElementById("kpiSaleAllowed").textContent=saleAllowed.toLocaleString("en-IN");
+    }
+
+    async function refreshStats(){
+        try{
+            var result=await App.api("api/products.php");
+            setStats(result.data.products||[]);
+        }catch(error){
+            setStats([]);
+        }
+    }
+
+    async function loadFilterOptions(){
+        try{
+            var result=await App.api("api/products.php?options=1");
+            var options=(result.data&&result.data.options)||{};
+            (options.categories||[]).forEach(function(row){
+                var option=document.createElement("option");
+                option.value=String(row.id);
+                option.textContent=(row.category_code?row.category_code+" - ":"")+row.category_name;
+                categoryFilter.appendChild(option);
+            });
+        }catch(error){
+            App.showError(error,"Unable to load Product filters.");
+        }
+    }
 
     function escapeHtml(value){
         return String(value===null||value===undefined?"":value)
@@ -138,7 +209,7 @@ $headScripts = [
         serverSide:true,
         searching:true,
         searchDelay:350,
-        appSearchPlaceholder:"Search Products...",
+        appSearch:false,
         appLoaderText:"Loading products...",
         pageLength:10,
         lengthMenu:[[10,25,50,100],[10,25,50,100]],
@@ -159,6 +230,9 @@ $headScripts = [
             params.set("start",data.start);
             params.set("length",data.length);
             params.set("search[value]",data.search.value||"");
+            if(categoryFilter.value!=="")params.set("category_id",categoryFilter.value);
+            if(typeFilter.value!=="")params.set("product_type",typeFilter.value);
+            if(saleFilter.value!=="")params.set("sale_allowed",saleFilter.value);
             if(statusFilter.value!=="")params.set("status",statusFilter.value);
             if(data.order&&data.order[0]){
                 params.set("order[0][column]",data.order[0].column);
@@ -219,7 +293,9 @@ $headScripts = [
         window.clearTimeout(searchTimer);
         searchTimer=window.setTimeout(function(){table.search(masterSearch.value.trim()).draw();},350);
     });
-    statusFilter.addEventListener("change",function(){table.ajax.reload(null,true);});
+    [categoryFilter,typeFilter,saleFilter,statusFilter].forEach(function(filter){
+        filter.addEventListener("change",function(){table.ajax.reload(null,true);});
+    });
 
     document.addEventListener("click",function(event){
         var button=event.target.closest(".js-status");
@@ -236,10 +312,13 @@ $headScripts = [
         }).then(function(result){
             if(window.showToast)showToast(result.message||"Product status updated.",{type:"success",duration:2});
             table.ajax.reload(null,false);
+            refreshStats();
         }).catch(function(error){
             App.showError(error,"Unable to change Product status.");
         }).finally(function(){button.disabled=false;});
     });
+    loadFilterOptions();
+    refreshStats();
 })(window.jQuery,window,document);
 </script>
 
