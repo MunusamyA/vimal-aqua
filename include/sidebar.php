@@ -19,7 +19,7 @@ require_once __DIR__ . '/web-config.php';
     </nav>
 
     <div class="sidebar-mini-footer">
-        <?php echo web_h(app_short_name()); ?> · v.0.0.1
+        <?php echo web_h(app_short_name()); ?> · V   0.0.1
     </div>
 </aside>
 
