@@ -41,21 +41,21 @@ $pageTitle='Sales';
     </div>
 </header>
 
-<main class="pos-content">
+<main class="pos-content pos-fast-v2">
 <form id="salesForm" novalidate>
 <input id="saleRef" type="hidden">
-
-<section class="pos-card pos-header-card">
+<section class="pos-card pos-header-card" id="fastBillDetails">
+    <div class="fast-section-title"><span class="fast-step">01</span><div><strong>Billing Details</strong><small>Choose sale type and customer</small></div><button class="fast-more-toggle" type="button" id="fastMoreToggle" aria-expanded="false" aria-controls="aquaHeaderGrid"><i data-lucide="sliders-horizontal"></i> More details</button></div>
     <div class="pos-form-grid aqua-header-grid" id="aquaHeaderGrid">
         <div class="field" id="saleModeField">
             <label for="saleMode" class="required">Sale Type</label>
             <select id="saleMode" required></select>
         </div>
-        <div class="field mobile-hide-document-meta">
+        <div class="field mobile-hide-document-meta fast-extra-field">
             <label for="saleNo">Document No</label>
             <input id="saleNo" type="text" readonly placeholder="Auto generated">
         </div>
-        <div class="field mobile-hide-document-meta">
+        <div class="field mobile-hide-document-meta fast-extra-field">
             <label for="saleDate" class="required">Date</label>
             <input id="saleDate" type="date" required value="<?php echo web_h(date('Y-m-d')); ?>">
         </div>
@@ -63,7 +63,7 @@ $pageTitle='Sales';
             <label for="customerId" class="required">Customer</label>
             <select id="customerId" required><option value="">Select Customer</option></select>
         </div>
-        <div class="field remarks-field" id="remarksField">
+        <div class="field remarks-field fast-extra-field" id="remarksField">
             <label for="remarks">Remarks</label>
             <input id="remarks" type="text" maxlength="255" placeholder="Optional">
         </div>
@@ -105,15 +105,18 @@ $pageTitle='Sales';
         <span id="customerReturnableBreakdown" class="muted"></span>
     </div>
 
-    <div class="pos-supply-line compact-status-line">
+    <div class="pos-supply-line compact-status-line fast-source-indicator">
         <strong id="stockSourceLabel">Plant Stock</strong>
         <span id="modeHelp" hidden></span>
         <span class="pos-shortcut-help" id="taxShortcutHelp" hidden>Ctrl + Shift + U · GST / Non-GST</span>
     </div>
 </section>
 
+
+<div class="fast-billing-layout">
+  <div class="fast-billing-cart">
 <section class="pos-card" id="productEntryCard">
-    <div class="pos-section-head"><div><h2>Product Entry</h2><p id="productEntryHelp" hidden></p></div></div>
+    <div class="pos-section-head fast-product-head"><div class="fast-heading"><span class="fast-step">02</span><div><h2>Add Products</h2><p id="productEntryHelp" hidden></p></div></div><span class="fast-key-hint">Search → Qty → Add</span></div>
     <div class="product-entry-scroll">
         <div class="aqua-product-entry-grid">
             <div class="field product-col"><label for="entryProduct">Product <span class="muted">(Select Customer first)</span></label><select id="entryProduct"><option value="">Select Product</option></select></div>
@@ -133,7 +136,7 @@ $pageTitle='Sales';
 </section>
 
 <section class="pos-card items-card">
-    <div class="pos-section-head"><div><h2 id="itemsHeading">Sales Items</h2><p id="itemsHelp">No Products added.</p></div></div>
+    <div class="pos-section-head"><div class="fast-heading"><span class="fast-step">03</span><div><h2 id="itemsHeading">Bill Items</h2><p id="itemsHelp">No Products added.</p></div></div><span class="fast-items-hint">Edit quantities directly</span></div>
     <div class="pos-items-table-wrap">
         <table class="pos-items-table" id="salesItemsTable">
             <thead><tr>
@@ -165,9 +168,26 @@ $pageTitle='Sales';
     </div>
 </section>
 
-<section class="pos-bottom-grid">
+  </div>
+  <aside class="fast-billing-checkout" aria-label="Bill summary and payment">
+    <div class="pos-card summary-card" id="summaryCard">
+        <div class="pos-section-head"><div class="fast-heading"><span class="fast-step">04</span><div><h2>Bill Summary</h2></div></div></div>
+        <div class="summary-lines">
+            <div><span>Gross</span><strong id="sumGross">₹0.00</strong></div>
+            <div><span>Item Discount</span><strong id="sumItemDiscount">₹0.00</strong></div>
+            <div class="summary-control-row discount-field"><label for="overallDiscountType">Overall Discount</label><select id="overallDiscountType"><option value="1">None</option><option value="2">Percentage</option><option value="3">Amount</option></select></div>
+            <div class="summary-control-row discount-field"><label for="overallDiscountValue">Discount Value</label><input id="overallDiscountValue" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
+            <div><span>Overall Discount</span><strong id="sumOverallDiscount">₹0.00</strong></div>
+            <div class="tax-summary-line"><span>Tax</span><strong id="sumTax">₹0.00</strong></div>
+            <div class="summary-control-row"><label for="otherCharges">Other Charges</label><input id="otherCharges" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
+            <div class="round-row"><span>Round Off</span><span class="round-actions"><strong id="sumRoundOff">₹0.00</strong><button class="btn gray small" type="button" id="roundOffButton">Round Off</button></span></div>
+            <div id="summaryReceivedRow"><span>Received</span><strong id="sumPaid">₹0.00</strong></div>
+            <div id="summaryOutstandingRow"><span>Outstanding</span><strong id="sumBalance">₹0.00</strong></div>
+            <div class="grand-total-line"><span>GRAND TOTAL</span><strong id="sumGrandTotal">₹0.00</strong></div>
+        </div>
+    </div>
     <div class="pos-card payment-card" id="paymentCard">
-        <div class="pos-section-head"><div><h2>Payment</h2></div></div>
+        <div class="pos-section-head"><div class="fast-heading"><span class="fast-step">05</span><div><h2>Payment</h2></div></div></div>
         <div class="mobile-payment-wrap" id="mobilePaymentWrap">
             <div class="mobile-payment-entry">
                 <div class="field">
@@ -251,28 +271,11 @@ $pageTitle='Sales';
         </div>
     </div>
 
-    <div class="pos-card summary-card" id="summaryCard">
-        <div class="pos-section-head"><div><h2>Summary</h2></div></div>
-        <div class="summary-lines">
-            <div><span>Gross</span><strong id="sumGross">₹0.00</strong></div>
-            <div><span>Item Discount</span><strong id="sumItemDiscount">₹0.00</strong></div>
-            <div class="summary-control-row discount-field"><label for="overallDiscountType">Overall Discount</label><select id="overallDiscountType"><option value="1">None</option><option value="2">Percentage</option><option value="3">Amount</option></select></div>
-            <div class="summary-control-row discount-field"><label for="overallDiscountValue">Discount Value</label><input id="overallDiscountValue" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
-            <div><span>Overall Discount</span><strong id="sumOverallDiscount">₹0.00</strong></div>
-            <div class="tax-summary-line"><span>Tax</span><strong id="sumTax">₹0.00</strong></div>
-            <div class="summary-control-row"><label for="otherCharges">Other Charges</label><input id="otherCharges" type="text" inputmode="decimal" data-validation="decimal" data-decimal-places="2" placeholder="0.00"></div>
-            <div class="round-row"><span>Round Off</span><span class="round-actions"><strong id="sumRoundOff">₹0.00</strong><button class="btn gray small" type="button" id="roundOffButton">Round Off</button></span></div>
-            <div id="summaryReceivedRow"><span>Received</span><strong id="sumPaid">₹0.00</strong></div>
-            <div id="summaryOutstandingRow"><span>Outstanding</span><strong id="sumBalance">₹0.00</strong></div>
-            <div class="grand-total-line"><span>GRAND TOTAL</span><strong id="sumGrandTotal">₹0.00</strong></div>
-        </div>
-    </div>
-</section>
-
+  </aside>
+</div>
 <section class="pos-card remarks-card" id="remarksCardCompact" hidden></section>
 </form>
 </main>
-
 <footer class="pos-actionbar">
     <div class="mobile-fast-total" id="mobileFastTotal">
         <span class="mobile-fast-total-main"><small>Total</small><strong id="mobileGrandTotal">₹0.00</strong></span>
@@ -286,6 +289,23 @@ $pageTitle='Sales';
     </div>
 </footer>
 </div>
+<script>
+(function () {
+    function ready() {
+        var button = document.getElementById('fastMoreToggle');
+        var card = document.getElementById('fastBillDetails');
+        if (!button || !card) return;
+        card.classList.add('fast-details-ready');
+        button.addEventListener('click', function () {
+            var expanded = button.getAttribute('aria-expanded') !== 'true';
+            button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+            card.classList.toggle('fast-details-open', expanded);
+        });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready);
+    else ready();
+})();
+</script>
 
 <script>
 (function (window, document) {
